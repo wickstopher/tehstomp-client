@@ -80,11 +80,7 @@ addHeaders headers (Some h hs)  = (Some h (addHeaders headers hs))
 textFrame :: String -> Command -> Frame
 textFrame message command = let encoding = (UTF.fromString message) in
     Frame command 
-          (makeHeaders [
-            plainTextContentHeader,
-            contentLengthHeader encoding
-            ]
-          )
+          (makeHeaders [plainTextContentHeader, contentLengthHeader encoding])
           (Body encoding)
 
 
@@ -105,6 +101,17 @@ contentLengthHeader s = Header "content-length" (show $ UTF.length s)
 destinationHeader :: String -> Header
 destinationHeader s = Header "destination" s
 
+idHeader :: String -> Header
+idHeader s = Header "id" s
+
+ackHeader :: String -> Header
+ackHeader s = Header "ack" s
+
+txHeader :: String -> Header
+txHeader tx = Header "transaction" tx
+
+receiptHeader :: String -> Header
+receiptHeader receipt = Header "receipt" receipt
 
 -- Client frames
 
@@ -114,6 +121,37 @@ stomp host = Frame STOMP (stompHeaders host) EmptyBody
 connect :: String -> Frame
 connect host = Frame CONNECT (stompHeaders host) EmptyBody
 
+sendText :: String -> String -> Frame
+sendText message dest = 
+    addFrameHeaderFront (destinationHeader dest) (textFrame message SEND)
+
+subscribe :: String -> String -> String -> Frame
+subscribe id dest ack = Frame 
+    SUBSCRIBE 
+    (makeHeaders [idHeader id, destinationHeader dest, ackHeader ack])
+    EmptyBody
+
+unsubscribe :: String -> Frame
+unsubscribe id = Frame UNSUBSCRIBE (makeHeaders [idHeader id]) EmptyBody
+
+ack :: String -> Frame
+ack id = Frame ACK (makeHeaders [idHeader id]) EmptyBody
+
+nack :: String -> Frame
+nack id = Frame NACK (makeHeaders [idHeader id]) EmptyBody
+
+begin :: String -> Frame
+begin tx = Frame BEGIN (makeHeaders [txHeader tx]) EmptyBody
+
+commit :: String -> Frame
+commit tx = Frame COMMIT (makeHeaders [txHeader tx]) EmptyBody
+
+abort :: String -> Frame
+abort tx = Frame ABORT (makeHeaders [txHeader tx]) EmptyBody
+
+disconnect :: String -> Frame
+disconnect receipt = Frame DISCONNECT (makeHeaders [receiptHeader receipt]) EmptyBody
+
 -- Server frames
 
 connected :: Frame
@@ -122,6 +160,3 @@ connected = Frame CONNECTED (makeHeaders [versionHeader]) EmptyBody
 errorFrame :: String -> Frame
 errorFrame message = textFrame message ERROR
 
-sendText :: String -> String -> Frame
-sendText message dest = 
-    addFrameHeaderFront (destinationHeader dest) (textFrame message SEND)
