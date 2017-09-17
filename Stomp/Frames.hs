@@ -56,11 +56,20 @@ addHeaderFront :: Header -> Headers -> Headers
 addHeaderFront newHeader EndOfHeaders = Some newHeader EndOfHeaders
 addHeaderFront newHeader (Some h hs)  = Some newHeader (addHeaderFront h hs)
 
+addHeaderAfter :: HeaderName -> Header -> Headers -> Headers
+addHeaderAfter name newHeader EndOfHeaders = Some newHeader EndOfHeaders
+addHeaderAfter n1 newHeader (Some h@(Header n2 _) hs)
+    | n1 == n2   = Some h (addHeaderFront newHeader hs)
+    | otherwise  = Some h (addHeaderAfter n1 newHeader hs)
+
 addFrameHeaderEnd :: Header -> Frame -> Frame
 addFrameHeaderEnd header (Frame c h b) = Frame c (addHeaderEnd header h) b
 
 addFrameHeaderFront :: Header -> Frame -> Frame
 addFrameHeaderFront header (Frame c h b) = Frame c (addHeaderFront header h) b
+
+addFrameHeaderAfter :: HeaderName -> Header -> Frame -> Frame
+addFrameHeaderAfter name header (Frame c h b) = Frame c (addHeaderAfter name header h) b
 
 addHeaders :: Headers -> Headers -> Headers
 addHeaders headers EndOfHeaders = headers
