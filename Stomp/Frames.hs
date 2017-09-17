@@ -75,6 +75,10 @@ addHeaders :: Headers -> Headers -> Headers
 addHeaders headers EndOfHeaders = headers
 addHeaders headers (Some h hs)  = (Some h (addHeaders headers hs))
 
+addFrameHeaders :: Headers -> Frame -> Frame
+addFrameHeaders h1 (Frame c h2 b) = Frame c (addHeaders h2 h1) b
+
+
 -- Frame utility functions
 
 textFrame :: String -> Command -> Frame
@@ -112,6 +116,16 @@ txHeader tx = Header "transaction" tx
 
 receiptHeader :: String -> Header
 receiptHeader receipt = Header "receipt" receipt
+
+receiptIdHeader :: String -> Header
+receiptIdHeader id = Header "receipt-id" id
+
+subscriptionHeader :: String -> Header
+subscriptionHeader id = Header "subscription" id
+
+messageIdHeader :: String -> Header
+messageIdHeader id = Header "message-id" id
+
 
 -- Client frames
 
@@ -152,6 +166,7 @@ abort tx = Frame ABORT (makeHeaders [txHeader tx]) EmptyBody
 disconnect :: String -> Frame
 disconnect receipt = Frame DISCONNECT (makeHeaders [receiptHeader receipt]) EmptyBody
 
+
 -- Server frames
 
 connected :: Frame
@@ -160,3 +175,12 @@ connected = Frame CONNECTED (makeHeaders [versionHeader]) EmptyBody
 errorFrame :: String -> Frame
 errorFrame message = textFrame message ERROR
 
+textMessage :: String -> String -> String -> String -> Frame
+textMessage message subscription id dest = 
+    let 
+      headers = makeHeaders [subscriptionHeader subscription, messageIdHeader id, destinationHeader dest] 
+    in
+      addFrameHeaders headers (textFrame message MESSAGE)
+
+receipt :: String -> Frame
+receipt id = Frame RECEIPT (makeHeaders [receiptIdHeader id]) EmptyBody
