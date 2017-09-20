@@ -36,7 +36,7 @@ instance Show Headers where
 
 instance Show Body where
     show EmptyBody = ""
-    show (Body s)    = show s
+    show (Body s)  = show s
 
 instance Show Frame where
     show (Frame c h b) = show c ++ "\n" ++ show h ++ show b ++ "\NUL"
@@ -176,7 +176,7 @@ errorFrame :: String -> Frame
 errorFrame message = textFrame message ERROR
 
 textMessage :: String -> String -> String -> String -> Frame
-textMessage message subscription id dest = 
+textMessage subscription id dest message = 
     let 
       headers = makeHeaders [subscriptionHeader subscription, messageIdHeader id, destinationHeader dest] 
     in
