@@ -1,25 +1,42 @@
 import Network as Network
-import System.IO
-import Data.ByteString
+import Data.ByteString (hPut)
+import System.IO as IO
 import Stomp.Frames
+import Stomp.Frames.IO
+import Stomp.Util
 
-main :: IO ()
+main :: IO (Maybe Handle)
 main = do
-    handle <- Network.connectTo "localhost" (PortNumber 2323)
-    hPut handle (frameToBytes (connect "hi"))
-    hPut handle (frameToBytes (sendText "hi" "someq"))
-    hPut handle (frameToBytes (sendText "bye" "someq"))
-    hPut handle (frameToBytes (disconnect "buhuug"))
-    hClose handle
+    hSetBuffering stdout NoBuffering
+    prompt Nothing
 
-sendFrames :: [Frame] -> IO ()
-sendFrames frames = do
-    handle <- Network.connectTo "localhost" (PortNumber 2323)
-    processFrames handle frames
-    hClose handle
+prompt :: Maybe Handle -> IO (Maybe Handle)
+prompt handle = do
+    putStr "<STOMP> "
+    input <- getLine
+    handle <- processInput (tokenize " " input) handle
+    prompt handle
 
-processFrames :: Handle -> [Frame] -> IO ()
-processFrames handle [] = return ()
-processFrames handle (frame:frames) = do
-    hPut handle (frameToBytes frame)
-    processFrames handle frames
+processInput :: [String] -> Maybe Handle -> IO (Maybe Handle)
+processInput [] handle = do return handle
+
+processInput ("connect":ip:p:[]) handle = do
+    newHandle <- Network.connectTo ip (portFromString p)
+    hPut newHandle (frameToBytes $ connect "nohost")
+    response <- parseFrame newHandle
+    putStrLn (show response)
+    return $ Just newHandle
+
+processInput ("send":message:queue:[]) h@(Just handle) = do
+    hPut handle (frameToBytes $ sendText message queue)
+    return h
+processInput ("send":_) Nothing = do
+    putStrLn "You must initiate a connection before sending a message"
+    return Nothing
+
+processInput _ handle = do
+    putStrLn "Unrecognized or malformed command"
+    return handle
+
+portFromString :: String -> PortID
+portFromString s = PortNumber (fromIntegral ((read s)::Int))
