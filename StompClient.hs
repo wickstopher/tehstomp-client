@@ -1,3 +1,4 @@
+import Control.Exception (try, SomeException)
 import Network as Network
 import Data.ByteString (hPut)
 import System.IO as IO
@@ -14,8 +15,12 @@ prompt :: Maybe Handle -> IO (Maybe Handle)
 prompt handle = do
     putStr "<STOMP> "
     input <- getLine
-    handle <- processInput (tokenize " " input) handle
-    prompt handle
+    newHandle <- try (processInput (tokenize " " input) handle) :: IO (Either SomeException (Maybe Handle))
+    case newHandle of 
+        Left exception -> do
+            putStrLn  ("Caught exception: " ++ (show exception))
+            prompt handle
+        Right newHandle -> prompt newHandle
 
 processInput :: [String] -> Maybe Handle -> IO (Maybe Handle)
 processInput [] handle = do return handle
@@ -40,3 +45,5 @@ processInput _ handle = do
 
 portFromString :: String -> PortID
 portFromString s = PortNumber (fromIntegral ((read s)::Int))
+
+
