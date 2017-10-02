@@ -1,6 +1,7 @@
 import Control.Exception (try, SomeException)
 import Network as Network
 import Data.ByteString (hPut)
+import Data.List (intercalate)
 import System.IO as IO
 import Stomp.Frames
 import Stomp.Frames.IO
@@ -29,11 +30,17 @@ processInput ("connect":ip:p:[]) handle = do
     newHandle <- Network.connectTo ip (portFromString p)
     hPut newHandle (frameToBytes $ connect "nohost")
     response <- parseFrame newHandle
-    putStrLn (show response)
-    return $ Just newHandle
+    case response of
+        (Frame CONNECTED _ _) -> do
+            putStrLn $ "Connected to " ++ ip ++ " on port " ++ p
+            return $ Just newHandle
+        (Frame ERROR _ body) -> do
+            putStrLn "There was a problem connecting: "
+            putStrLn (show body)
+            return handle
 
-processInput ("send":message:queue:[]) h@(Just handle) = do
-    hPut handle (frameToBytes $ sendText message queue)
+processInput ("send":queue:message) h@(Just handle) = do
+    hPut handle (frameToBytes $ sendText (intercalate " " message) queue)
     return h
 processInput ("send":_) Nothing = do
     putStrLn "You must initiate a connection before sending a message"
