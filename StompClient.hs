@@ -46,11 +46,25 @@ processInput ("send":_) Nothing = do
     putStrLn "You must initiate a connection before sending a message"
     return Nothing
 
+processInput ("sendr":queue:receiptId:message) h@(Just handle) = do
+    hPut handle (frameToBytes $ addReceiptHeader receiptId $ (sendText (intercalate " " message) queue))
+    response <- parseFrame handle
+    case response of
+        (Frame RECEIPT _ _) -> do
+            case (getReceiptId response) of
+                Just receiptId -> putStrLn $ "Received a receipt for message " ++ receiptId   
+                Nothing        -> putStrLn $ (show response)
+        (Frame ERROR _ body) -> do
+            putStrLn "There was a problem: "
+            putStrLn (show body)
+    return h
+processInput ("sendr":_) Nothing = do
+    putStrLn "You must initiate a connection before sending a message"
+    return Nothing
+
 processInput _ handle = do
     putStrLn "Unrecognized or malformed command"
     return handle
 
 portFromString :: String -> PortID
 portFromString s = PortNumber (fromIntegral ((read s)::Int))
-
-
