@@ -20,12 +20,12 @@ main = do
 
 prompt :: Session -> IO Session
 prompt session = do
-    putStr "<STOMP> "
+    putStr "stomp> "
     input <- getLine
     result <- try (processInput (tokenize " " input) session) :: IO (Either SomeException Session)
     case result of 
         Left exception -> do
-            putStrLn  ("Caught exception: " ++ (show exception))
+            putStrLn  ("[ERROR] " ++ (show exception))
             prompt session
         Right session' -> prompt session'
 
@@ -49,6 +49,28 @@ processInput ("connect":ip:p:[]) Disconnected = do
             putStrLn (show body)
             return Disconnected
 
+processInput ("connect":_:_:[]) session = do
+    putStrLn "Please disconnect from your current session before initiating a new one"
+    return session
+
+processInput ("disconnect":[]) Disconnected = do
+    putStrLn "You are not currently connected to a session"
+    return Disconnected
+processInput ("disconnect":[]) session = do
+    sendFrame session $ disconnect "recv-tehstomp-disconnect"
+    response <- receiveFrame session
+    case response of
+        (Frame RECEIPT _ _) -> do
+            case (getReceiptId response) of 
+                Just "recv-tehstomp-disconnect" -> putStrLn "Disconnect request acknowledged"
+                otherwise                       -> putStrLn $ (show response) -- TODO: throw Exception here?
+        (Frame ERROR _ body) -> do
+            putStrLn "There was a prioblem: "
+            putStrLn (show body)
+            -- TODO: throw Exception here?
+    disconnectSession session
+    return Disconnected
+
 processInput ("send":_) Disconnected = do
     putStrLn "You must initiate a connection before sending a message"
     return Disconnected
@@ -66,10 +88,11 @@ processInput ("sendr":queue:receiptId:message) session = do
         (Frame RECEIPT _ _) -> do
             case (getReceiptId response) of
                 Just receiptId -> putStrLn $ "Received a receipt for message " ++ receiptId   
-                Nothing        -> putStrLn $ (show response)
+                Nothing        -> putStrLn $ (show response) -- TODO: throw Exception here
         (Frame ERROR _ body) -> do
             putStrLn "There was a problem: "
             putStrLn (show body)
+        -- TODO: throw Exception here?
     return session
 
 processInput _ session = do
@@ -80,7 +103,13 @@ portFromString :: String -> PortID
 portFromString s = PortNumber (fromIntegral ((read s)::Int))
 
 sendFrame :: Session -> Frame -> IO ()
-sendFrame (Session handle _ _) frame = do hPut handle $ frameToBytes frame
+sendFrame session frame = do hPut (getHandle session) $ frameToBytes frame
 
 receiveFrame :: Session -> IO Frame
-receiveFrame (Session handle _ _) = parseFrame handle
+receiveFrame session = parseFrame $ getHandle session
+
+disconnectSession :: Session -> IO ()
+disconnectSession session = hClose $ getHandle session
+
+getHandle :: Session -> Handle
+getHandle (Session handle _ _) = handle
