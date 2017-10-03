@@ -62,7 +62,7 @@ processInput ("disconnect":[]) session = do
     case response of
         (Frame RECEIPT _ _) -> do
             case (getReceiptId response) of 
-                Just "recv-tehstomp-disconnect" -> putStrLn "Disconnect request acknowledged"
+                Just "recv-tehstomp-disconnect" -> putStrLn "Successfully disconnected from the session"
                 otherwise                       -> putStrLn $ (show response) -- TODO: throw Exception here?
         (Frame ERROR _ body) -> do
             putStrLn "There was a prioblem: "
