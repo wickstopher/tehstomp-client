@@ -5,98 +5,108 @@ import Data.List (intercalate)
 import System.IO as IO
 import Stomp.Frames
 import Stomp.Frames.IO
+import qualified Stomp.TLogger as TLog
 import Stomp.Util
 
-data Session = Session Handle String String | Disconnected
+data Session = Session Handle String String TLog.Logger | Disconnected TLog.Logger
 
 instance Show Session where
-    show (Session h ip port) = "Connected to broker at " ++ ip ++ ":" ++ port
-    show Disconnected        = "Session is not connected"
+    show (Session h ip port _) = "Connected to broker at " ++ ip ++ ":" ++ port
+    show (Disconnected _)      = "Session is not connected"
 
 main :: IO Session
 main = do
     hSetBuffering stdout NoBuffering
-    prompt Disconnected
+    console <- TLog.initLogger stdout
+    prompt $ Disconnected console
 
 prompt :: Session -> IO Session
 prompt session = do
-    putStr "stomp> "
+    sPrompt session "stomp> "
     input <- getLine
     result <- try (processInput (tokenize " " input) session) :: IO (Either SomeException Session)
     case result of 
         Left exception -> do
-            putStrLn  ("[ERROR] " ++ (show exception))
+            sLog session ("[ERROR] " ++ (show exception))
             prompt session
         Right session' -> prompt session'
 
 processInput :: [String] -> Session -> IO Session
+
+-- process blank input (return press)
 processInput [] session = do return session
 
+-- session command
 processInput ("session":[]) session = do
-    putStrLn $ show session
+    sLog session $ show session
     return session
 
-processInput ("connect":ip:p:[]) Disconnected = do
+-- connect command
+processInput ("connect":ip:p:[]) session@(Disconnected _) = do
     newHandle <- Network.connectTo ip (portFromString p)
     hPut newHandle (frameToBytes $ connect "nohost")
     response <- parseFrame newHandle
     case response of
         (Frame CONNECTED _ _) -> do
-            putStrLn $ "Connected to " ++ ip ++ " on port " ++ p
-            return $ Session newHandle ip p
+            sLog session $ "Connected to " ++ ip ++ " on port " ++ p
+            return $ Session newHandle ip p (getLogger session)
         (Frame ERROR _ body) -> do
-            putStrLn "There was a problem connecting: "
-            putStrLn (show body)
-            return Disconnected
+            sLog session "There was a problem connecting: "
+            sLog session (show body)
+            return session
 
 processInput ("connect":_:_:[]) session = do
-    putStrLn "Please disconnect from your current session before initiating a new one"
+    sLog session "Please disconnect from your current session before initiating a new one"
     return session
 
-processInput ("disconnect":[]) Disconnected = do
-    putStrLn "You are not currently connected to a session"
-    return Disconnected
+-- disconnect command
+processInput ("disconnect":[]) session@(Disconnected _) = do
+    sLog session "You are not currently connected to a session"
+    return session
 processInput ("disconnect":[]) session = do
     sendFrame session $ disconnect "recv-tehstomp-disconnect"
     response <- receiveFrame session
     case response of
         (Frame RECEIPT _ _) -> do
             case (getReceiptId response) of 
-                Just "recv-tehstomp-disconnect" -> putStrLn "Successfully disconnected from the session"
-                otherwise                       -> putStrLn $ (show response) -- TODO: throw Exception here?
+                Just "recv-tehstomp-disconnect" -> sLog session "Successfully disconnected from the session"
+                otherwise                       -> sLog session $ (show response) -- TODO: throw Exception here?
         (Frame ERROR _ body) -> do
-            putStrLn "There was a prioblem: "
-            putStrLn (show body)
+            sLog session "There was a prioblem: "
+            sLog session (show body)
             -- TODO: throw Exception here?
     disconnectSession session
-    return Disconnected
+    return (Disconnected (getLogger session))
 
-processInput ("send":_) Disconnected = do
-    putStrLn "You must initiate a connection before sending a message"
-    return Disconnected
+-- send command
+processInput ("send":_) session@(Disconnected _) = do
+    sLog session "You must initiate a connection before sending a message"
+    return session
 processInput ("send":queue:message) session = do
     sendFrame session $ sendText (intercalate " " message) queue
     return session
 
-processInput ("sendr":_) Disconnected = do
-    putStrLn "You must initiate a connection before sending a message"
-    return Disconnected
+-- sendr (send with receipt request) command
+processInput ("sendr":_) session@(Disconnected _) = do
+    sLog session "You must initiate a connection before sending a message"
+    return session
 processInput ("sendr":queue:receiptId:message) session = do
     sendFrame session $ addReceiptHeader receiptId (sendText (intercalate " " message) queue)
     response <- receiveFrame session
     case response of
         (Frame RECEIPT _ _) -> do
             case (getReceiptId response) of
-                Just receiptId -> putStrLn $ "Received a receipt for message " ++ receiptId   
-                Nothing        -> putStrLn $ (show response) -- TODO: throw Exception here
+                Just receiptId -> sLog session $ "Received a receipt for message " ++ receiptId   
+                Nothing        -> sLog session $ (show response) -- TODO: throw Exception here
         (Frame ERROR _ body) -> do
-            putStrLn "There was a problem: "
-            putStrLn (show body)
+            sLog session "There was a problem: "
+            sLog session (show body)
         -- TODO: throw Exception here?
     return session
 
+-- any other input pattern is considered an error
 processInput _ session = do
-    putStrLn "Unrecognized or malformed command"
+    sLog session "Unrecognized or malformed command"
     return session
 
 portFromString :: String -> PortID
@@ -112,4 +122,15 @@ disconnectSession :: Session -> IO ()
 disconnectSession session = hClose $ getHandle session
 
 getHandle :: Session -> Handle
-getHandle (Session handle _ _) = handle
+getHandle (Session handle _ _ _) = handle
+
+getLogger :: Session -> TLog.Logger
+getLogger (Session handle _ _ logger) = logger
+getLogger (Disconnected logger) = logger
+
+sLog :: Session -> String -> IO ()
+sLog session message = TLog.log (getLogger session) message
+
+
+sPrompt :: Session -> String -> IO ()
+sPrompt session message = TLog.prompt (getLogger session) message
