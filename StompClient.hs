@@ -8,7 +8,7 @@ import Stomp.Frames.IO
 import qualified Stomp.TLogger as TLog
 import Stomp.Util
 
-data Session = Session Handle String String TLog.Logger | Disconnected TLog.Logger
+data Session = Session FrameHandler String String TLog.Logger | Disconnected TLog.Logger
 
 instance Show Session where
     show (Session h ip port _) = "Connected to broker at " ++ ip ++ ":" ++ port
@@ -44,12 +44,14 @@ processInput ("session":[]) session = do
 -- connect command
 processInput ("connect":ip:p:[]) session@(Disconnected _) = do
     newHandle <- Network.connectTo ip (portFromString p)
-    hPut newHandle (frameToBytes $ connect "nohost")
-    response <- parseFrame newHandle
+    hSetBuffering newHandle NoBuffering
+    frameHandler <- initFrameHandler newHandle
+    put frameHandler $ connect "nohost"
+    response <- get frameHandler
     case response of
         (Frame CONNECTED _ _) -> do
             sLog session $ "Connected to " ++ ip ++ " on port " ++ p
-            return $ Session newHandle ip p (getLogger session)
+            return $ Session frameHandler ip p (getLogger session)
         (Frame ERROR _ body) -> do
             sLog session "There was a problem connecting: "
             sLog session (show body)
@@ -113,16 +115,16 @@ portFromString :: String -> PortID
 portFromString s = PortNumber (fromIntegral ((read s)::Int))
 
 sendFrame :: Session -> Frame -> IO ()
-sendFrame session frame = do hPut (getHandle session) $ frameToBytes frame
+sendFrame session frame = put (getHandler session) frame
 
 receiveFrame :: Session -> IO Frame
-receiveFrame session = parseFrame $ getHandle session
+receiveFrame session = get $ getHandler session
 
 disconnectSession :: Session -> IO ()
-disconnectSession session = hClose $ getHandle session
+disconnectSession session = close $ getHandler session
 
-getHandle :: Session -> Handle
-getHandle (Session handle _ _ _) = handle
+getHandler :: Session -> FrameHandler
+getHandler (Session handler _ _ _) = handler
 
 getLogger :: Session -> TLog.Logger
 getLogger (Session handle _ _ logger) = logger
