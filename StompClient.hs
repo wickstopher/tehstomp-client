@@ -106,10 +106,23 @@ processInput ("sendr":queue:receiptId:message) session = do
         -- TODO: throw Exception here?
     return session
 
+-- send the same message n times
+processInput ("loopsend":_) session@(Disconnected _) = do
+    sLog session "You must initiate a connection before sending a message"
+    return session
+processInput ("loopsend":n:q:m) session = do
+    loopSend (sendText (intercalate " " m) q) session (fromIntegral ((read n)::Int))
+
 -- any other input pattern is considered an error
 processInput _ session = do
     sLog session "Unrecognized or malformed command"
     return session
+
+loopSend :: Frame -> Session -> Int -> IO Session
+loopSend _ session 0 =  do return session
+loopSend frame session n = do
+    sendFrame session frame
+    loopSend frame session (n-1)
 
 portFromString :: String -> PortID
 portFromString s = PortNumber (fromIntegral ((read s)::Int))
