@@ -28,7 +28,7 @@ initFrameRouter handler = do
     subscriptions <- return $ Subscriptions HM.empty
     frameRouter   <- return $ FrameRouter frameChannel updateChannel [] subscriptions
     forkIO $ frameLoop frameChannel handler
-    -- forkIO $ routerLoop frameRouter
+    forkIO $ routerLoop frameRouter
     return notifier
 
 frameLoop :: SChan (Maybe Frame) -> FrameHandler -> IO ()
@@ -42,3 +42,18 @@ routerLoop r@(FrameRouter frameChannel updateChannel responseChannels subscripti
     notification <- sync $ chooseEvt (alwaysEvt NoUpdate) (recvEvt updateChannel)
     frame        <- sync $ chooseEvt (alwaysEvt Nothing)  (recvEvt frameChannel)
     routerLoop r
+
+handleFrame :: Frame -> [ResponseChannel] -> Subscriptions -> IO ()
+handleFrame frame responseChannels subscriptions = 
+    let channels = selectChannels (getCommand frame) (getHeaders frame) responseChannels subscriptions in
+        sendFrame frame channels
+
+selectChannels :: Command -> Headers -> [ResponseChannel] -> Subscriptions -> [SChan Frame]
+selectChannels MESSAGE _ _ subscriptions = [] -- TODO find sub based on subID and send the frame to all listeners for tha tsub
+selectChannels _ _ responseChannels _ = responseChannels
+
+sendFrame :: Frame -> [SChan Frame] -> IO ()
+sendFrame frame []          = return ()
+sendFrame frame (chan:rest) = do
+    forkIO $ sync (sendEvt chan frame)
+    sendFrame frame rest
