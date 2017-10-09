@@ -11,14 +11,13 @@ type SubscriptionChannel = SChan Frame
 
 data Update        = ResponseRequest ResponseChannel  | 
                      SubscriptionRequest SubscriptionChannel |
-                     NoUpdate
+                     GotFrame Frame
 
 data Notifier      = Notifier (SChan Update)
 
 data Subscriptions = Subscriptions (HashMap String [SubscriptionChannel])
 
-data FrameRouter   = FrameRouter (SChan (Maybe Frame)) (SChan Update) [ResponseChannel] Subscriptions
-
+data FrameRouter   = FrameRouter (SChan Update) (SChan Update) [ResponseChannel] Subscriptions
 
 initFrameRouter :: FrameHandler -> IO Notifier
 initFrameRouter handler = do
@@ -31,16 +30,15 @@ initFrameRouter handler = do
     forkIO $ routerLoop frameRouter
     return notifier
 
-frameLoop :: SChan (Maybe Frame) -> FrameHandler -> IO ()
+frameLoop :: SChan Update -> FrameHandler -> IO ()
 frameLoop frameChannel handler = do
     frame <- get handler
-    sync $ sendEvt frameChannel (Just frame)
+    sync $ sendEvt frameChannel (GotFrame frame)
     frameLoop frameChannel handler
 
 routerLoop :: FrameRouter -> IO ()
 routerLoop r@(FrameRouter frameChannel updateChannel responseChannels subscriptions) = do
-    notification <- sync $ chooseEvt (alwaysEvt NoUpdate) (recvEvt updateChannel)
-    frame        <- sync $ chooseEvt (alwaysEvt Nothing)  (recvEvt frameChannel)
+    update <- sync $ chooseEvt (recvEvt frameChannel) (recvEvt updateChannel)
     routerLoop r
 
 handleFrame :: Frame -> [ResponseChannel] -> Subscriptions -> IO ()
@@ -57,3 +55,15 @@ sendFrame frame []          = return ()
 sendFrame frame (chan:rest) = do
     forkIO $ sync (sendEvt chan frame)
     sendFrame frame rest
+
+requestResponseEvents :: Notifier -> IO ResponseChannel
+requestResponseEvents (Notifier chan) = do
+    frameChannel <- sync newSChan
+    sync $ sendEvt chan (ResponseRequest frameChannel)
+    return frameChannel
+
+requestSubscriptionEvents :: Notifier -> IO SubscriptionChannel
+requestSubscriptionEvents (Notifier chan) = do
+    frameChannel <- sync newSChan
+    sync $ sendEvt chan (SubscriptionRequest frameChannel)
+    return frameChannel
