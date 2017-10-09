@@ -10,7 +10,7 @@ type ResponseChannel     = SChan Frame
 type SubscriptionChannel = SChan Frame
 
 data Update        = ResponseRequest ResponseChannel  | 
-                     SubscriptionRequest SubscriptionChannel |
+                     SubscriptionRequest String SubscriptionChannel |
                      GotFrame Frame
 
 data Notifier      = Notifier (SChan Update)
@@ -37,9 +37,33 @@ frameLoop frameChannel handler = do
     frameLoop frameChannel handler
 
 routerLoop :: FrameRouter -> IO ()
-routerLoop r@(FrameRouter frameChannel updateChannel responseChannels subscriptions) = do
-    update <- sync $ chooseEvt (recvEvt frameChannel) (recvEvt updateChannel)
-    routerLoop r
+routerLoop router@(FrameRouter frameChannel updateChannel _ _) = do
+    update      <- sync $ chooseEvt (recvEvt frameChannel) (recvEvt updateChannel)
+    router'     <- handleUpdate update router
+    routerLoop router'
+
+handleUpdate :: Update -> FrameRouter -> IO FrameRouter
+handleUpdate update router@(FrameRouter _ _ responseChannels subscriptions) = 
+    case update of
+        GotFrame frame -> do
+            handleFrame frame responseChannels subscriptions
+            return router
+        ResponseRequest responseChannel -> 
+            return $ addResponseChannel router responseChannel
+        SubscriptionRequest subId subChannel ->
+            return $ addSubscriptionChannel router subId subChannel
+
+addResponseChannel :: FrameRouter -> ResponseChannel -> FrameRouter
+addResponseChannel (FrameRouter f u r s) newChan =
+    FrameRouter f u  (newChan:r) s
+
+addSubscriptionChannel :: FrameRouter -> String -> SubscriptionChannel -> FrameRouter
+addSubscriptionChannel router@(FrameRouter f u r (Subscriptions subs)) subId newChan = 
+    let sub = HM.lookup subId subs in
+        case sub of 
+            Just subscriptionChannels ->
+                FrameRouter f u r (Subscriptions (HM.insert  subId (newChan:subscriptionChannels) subs))
+            Nothing -> router
 
 handleFrame :: Frame -> [ResponseChannel] -> Subscriptions -> IO ()
 handleFrame frame responseChannels subscriptions = 
@@ -47,7 +71,11 @@ handleFrame frame responseChannels subscriptions =
         sendFrame frame channels
 
 selectChannels :: Command -> Headers -> [ResponseChannel] -> Subscriptions -> [SChan Frame]
-selectChannels MESSAGE _ _ subscriptions = [] -- TODO find sub based on subID and send the frame to all listeners for tha tsub
+selectChannels MESSAGE headers _ (Subscriptions subs) = case (getValueForHeader "subscription" headers) of
+    Just subId -> case HM.lookup subId subs of
+        Just channels -> channels
+        Nothing       -> []  
+    Nothing -> []
 selectChannels _ _ responseChannels _ = responseChannels
 
 sendFrame :: Frame -> [SChan Frame] -> IO ()
@@ -62,8 +90,8 @@ requestResponseEvents (Notifier chan) = do
     sync $ sendEvt chan (ResponseRequest frameChannel)
     return frameChannel
 
-requestSubscriptionEvents :: Notifier -> IO SubscriptionChannel
-requestSubscriptionEvents (Notifier chan) = do
+requestSubscriptionEvents :: Notifier -> String -> IO SubscriptionChannel
+requestSubscriptionEvents (Notifier chan) subscriptionId = do
     frameChannel <- sync newSChan
-    sync $ sendEvt chan (SubscriptionRequest frameChannel)
+    sync $ sendEvt chan (SubscriptionRequest subscriptionId frameChannel)
     return frameChannel
