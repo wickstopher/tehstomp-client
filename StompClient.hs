@@ -140,6 +140,7 @@ subscriptionListener console subChan dest subId = do
     frame <- sync $ recvEvt subChan
     TLog.log console $ "Received message from destination " ++ dest ++ " (subscription ID " ++ subId ++ ")"
     TLog.log console (show frame)
+    TLog.prompt console "stomp> "
     subscriptionListener console subChan dest subId
 
 loopSend :: Frame -> Session -> Int -> IO Session

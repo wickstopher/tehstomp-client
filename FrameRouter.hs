@@ -70,7 +70,8 @@ addSubscriptionChannel router@(FrameRouter f u r (Subscriptions subs)) subId new
         case sub of 
             Just subscriptionChannels ->
                 FrameRouter f u r (Subscriptions (HM.insert  subId (newChan:subscriptionChannels) subs))
-            Nothing -> router
+            Nothing ->
+                FrameRouter f u r (Subscriptions (HM.insert subId [newChan] subs))
 
 handleFrame :: Frame -> [ResponseChannel] -> Subscriptions -> IO ()
 handleFrame frame responseChannels subscriptions = 
