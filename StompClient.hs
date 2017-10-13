@@ -1,8 +1,10 @@
 import Control.Exception (try, SomeException)
+import Control.Concurrent
 import Control.Concurrent.TxEvent
 import Network as Network
 import Data.ByteString (hPut)
 import Data.List (intercalate)
+import Data.Unique
 import System.IO as IO
 import Stomp.Frames
 import Stomp.Frames.IO
@@ -14,7 +16,7 @@ data Session = Session FrameHandler String String TLog.Logger Notifier ResponseC
 
 instance Show Session where
     show (Session h ip port _  _ _) = "Connected to broker at " ++ ip ++ ":" ++ port
-    show (Disconnected _)        = "Session is not connected"
+    show (Disconnected _)           = "Session is not connected"
 
 main :: IO Session
 main = do
@@ -117,10 +119,26 @@ processInput ("loopsend":_) session@(Disconnected _) = do
 processInput ("loopsend":n:q:m) session = do
     loopSend (sendText (intercalate " " m) q) session (fromIntegral ((read n)::Int))
 
+processInput ("subscribe":_) session@(Disconnected _) = do
+    sLog session "You must initiate a connection before adding a subscription"
+    return session
+processInput ("subscribe":dest:[]) session = do
+    uniqueId <- newUnique
+    subChan  <- requestSubscriptionEvents (getNotifier session) (show $ hashUnique uniqueId)
+    forkIO $ subscriptionListener (getLogger session) subChan dest (show $ hashUnique uniqueId)
+    return session
+
 -- any other input pattern is considered an error
 processInput _ session = do
     sLog session "Unrecognized or malformed command"
     return session
+
+subscriptionListener :: TLog.Logger -> SubscriptionChannel -> String -> String -> IO ()
+subscriptionListener console subChan dest subId = do
+    frame <- sync $ recvEvt subChan
+    TLog.log console $ "Received message from destination " ++ dest ++ " (subscription ID " ++ subId ++ ")"
+    TLog.log console (show frame)
+    subscriptionListener console subChan dest subId
 
 loopSend :: Frame -> Session -> Int -> IO Session
 loopSend _ session 0 =  do return session

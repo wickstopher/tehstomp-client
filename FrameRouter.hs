@@ -3,7 +3,8 @@ module FrameRouter (
     requestResponseEvents,
     requestSubscriptionEvents,
     Notifier,
-    ResponseChannel
+    ResponseChannel,
+    SubscriptionChannel
 ) where
 
 import Control.Concurrent
