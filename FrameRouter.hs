@@ -1,4 +1,10 @@
-module FrameRouter where
+module FrameRouter (
+    initFrameRouter,
+    requestResponseEvents,
+    requestSubscriptionEvents,
+    Notifier,
+    ResponseChannel
+) where
 
 import Control.Concurrent
 import Control.Concurrent.TxEvent
