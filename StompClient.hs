@@ -124,8 +124,10 @@ processInput ("subscribe":_) session@(Disconnected _) = do
     return session
 processInput ("subscribe":dest:[]) session = do
     uniqueId <- newUnique
-    subChan  <- requestSubscriptionEvents (getNotifier session) (show $ hashUnique uniqueId)
-    forkIO $ subscriptionListener (getLogger session) subChan dest (show $ hashUnique uniqueId)
+    subId    <- return (show $ hashUnique uniqueId)
+    sendFrame session $ subscribe subId dest "auto"
+    subChan  <- requestSubscriptionEvents (getNotifier session) subId
+    forkIO $ subscriptionListener (getLogger session) subChan dest subId
     return session
 
 -- any other input pattern is considered an error
