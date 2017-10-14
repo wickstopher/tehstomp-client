@@ -138,9 +138,9 @@ processInput _ session = do
 subscriptionListener :: TLog.Logger -> SubscriptionChannel -> String -> String -> IO ()
 subscriptionListener console subChan dest subId = do
     frame <- sync $ recvEvt subChan
-    TLog.log console $ "Received message from destination " ++ dest ++ " (subscription ID " ++ subId ++ ")"
+    TLog.log console $ "\n\nReceived message from destination " ++ dest ++ " (subscription ID " ++ subId ++ ")"
     TLog.log console (show frame)
-    TLog.prompt console "stomp> "
+    TLog.prompt console "\nstomp> "
     subscriptionListener console subChan dest subId
 
 loopSend :: Frame -> Session -> Int -> IO Session
