@@ -62,6 +62,9 @@ processInput ("connect":ip:p:[]) session@(Disconnected _) = do
             sLog session "There was a problem connecting: "
             sLog session (show body)
             return session
+        ParseError -> do
+            sLog session "There was an issue parsing the received frame"
+            return session
         GotEof -> do
             sLog session "The server disconnected before connections could be negotiated"
             return session
@@ -87,6 +90,8 @@ processInput ("disconnect":[]) session = do
             sLog session (show body)
         (NewFrame frame)               -> do
             sLog session $ "Got an unexpected frame type: " ++ (show $ getCommand frame)
+        ParseError -> do
+            sLog session "There was an issue parsing the received frame"
         GotEof -> do
             sLog session "Server disconnected before a response was received"
     disconnectSession session
@@ -121,6 +126,9 @@ processInput ("sendr":queue:receiptId:message) session = do
             return session
         GotEof -> do
             sLog session "Server disconnected unexpectedly"
+            disconnectSession session
+        ParseError -> do
+            sLog session "There was an issue parsing the received frame"
             disconnectSession session
 
 -- send the same message n times
@@ -158,6 +166,10 @@ subscriptionListener console subChan dest subId = do
             subscriptionListener console subChan dest subId
         GotEof         -> do
             TLog.log console $ "Server disconnected unexpectedly."
+            TLog.prompt console "\nstomp> "
+            return ()
+        ParseError     -> do
+            TLog.log console $ "There was an issue parsing the received frame"
             TLog.prompt console "\nstomp> "
             return ()
 
