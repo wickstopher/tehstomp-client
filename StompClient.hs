@@ -12,7 +12,7 @@ import qualified Stomp.TLogger as TLog
 import Stomp.Util
 import FrameRouter
 
-data Session = Session FrameHandler String String TLog.Logger Notifier ResponseChannel | Disconnected TLog.Logger
+data Session = Session FrameHandler String String TLog.Logger Notifier (SChan FrameEvt) | Disconnected TLog.Logger
 
 instance Show Session where
     show (Session h ip port _  _ _) = "Connected to broker at " ++ ip ++ ":" ++ port
@@ -53,14 +53,17 @@ processInput ("connect":ip:p:[]) session@(Disconnected _) = do
     put frameHandler $ connect "nohost"
     response <- get frameHandler
     case response of
-        (Frame CONNECTED _ _) -> do
+        (NewFrame (Frame CONNECTED _ _)) -> do
             sLog session $ "Connected to " ++ ip ++ " on port " ++ p
             notifier     <- initFrameRouter frameHandler
             responseChan <- requestResponseEvents notifier
             return $ Session frameHandler ip p (getLogger session) notifier responseChan
-        (Frame ERROR _ body) -> do
+        (NewFrame (Frame ERROR _ body)) -> do
             sLog session "There was a problem connecting: "
             sLog session (show body)
+            return session
+        GotEof -> do
+            sLog session "The server disconnected before connections could be negotiated"
             return session
 
 processInput ("connect":_:_:[]) session = do
@@ -75,16 +78,18 @@ processInput ("disconnect":[]) session = do
     sendFrame session $ disconnect "recv-tehstomp-disconnect"
     response <- getResponseFrame session
     case response of
-        (Frame RECEIPT _ _) -> do
-            case (getReceiptId response) of 
+        (NewFrame frame@(Frame RECEIPT _ _)) -> do
+            case (getReceiptId frame) of 
                 Just "recv-tehstomp-disconnect" -> sLog session "Successfully disconnected from the session"
-                otherwise                       -> sLog session $ (show response) -- TODO: throw Exception here?
-        (Frame ERROR _ body) -> do
+                otherwise                       -> sLog session $ (show frame) -- TODO: throw Exception here?
+        (NewFrame (Frame ERROR _ body)) -> do
             sLog session "There was a problem: "
             sLog session (show body)
-            -- TODO: throw Exception here?
+        (NewFrame frame)               -> do
+            sLog session $ "Got an unexpected frame type: " ++ (show $ getCommand frame)
+        GotEof -> do
+            sLog session "Server disconnected before a response was received"
     disconnectSession session
-    return (Disconnected (getLogger session))
 
 -- send command
 processInput ("send":_) session@(Disconnected _) = do
@@ -102,15 +107,21 @@ processInput ("sendr":queue:receiptId:message) session = do
     sendFrame session $ addReceiptHeader receiptId (sendText (intercalate " " message) queue)
     response <- getResponseFrame session
     case response of
-        (Frame RECEIPT _ _) -> do
-            case (getReceiptId response) of
+        (NewFrame frame@(Frame RECEIPT _ _)) -> do
+            case (getReceiptId frame) of
                 Just receiptId -> sLog session $ "Received a receipt for message " ++ receiptId   
-                Nothing        -> sLog session $ (show response) -- TODO: throw Exception here
-        (Frame ERROR _ body) -> do
+                Nothing        -> sLog session $ (show frame) -- TODO: throw Exception here
+            return session
+        (NewFrame (Frame ERROR _ body)) -> do
             sLog session "There was a problem: "
             sLog session (show body)
-        -- TODO: throw Exception here?
-    return session
+            return session
+        (NewFrame frame) -> do
+            sLog session $ "Got an unexpected frame type: " ++ (show $ getCommand frame)
+            return session
+        GotEof -> do
+            sLog session "Server disconnected unexpectedly"
+            disconnectSession session
 
 -- send the same message n times
 processInput ("loopsend":_) session@(Disconnected _) = do
@@ -135,13 +146,20 @@ processInput _ session = do
     sLog session "Unrecognized or malformed command"
     return session
 
-subscriptionListener :: TLog.Logger -> SubscriptionChannel -> String -> String -> IO ()
+subscriptionListener :: TLog.Logger -> (SChan FrameEvt) -> String -> String -> IO ()
 subscriptionListener console subChan dest subId = do
-    frame <- sync $ recvEvt subChan
-    TLog.log console $ "\n\nReceived message from destination " ++ dest ++ " (subscription ID " ++ subId ++ ")"
-    TLog.log console (show frame)
-    TLog.prompt console "\nstomp> "
-    subscriptionListener console subChan dest subId
+    frameEvt <- sync $ recvEvt subChan
+    TLog.prompt console $ "\n\n[subscription " ++ subId ++ "] "
+    case frameEvt of
+        NewFrame frame -> do
+            TLog.log console $ "Received message from destination " ++ dest
+            TLog.log console (show frame)
+            TLog.prompt console "\nstomp> "
+            subscriptionListener console subChan dest subId
+        GotEof         -> do
+            TLog.log console $ "Server disconnected unexpectedly."
+            TLog.prompt console "\nstomp> "
+            return ()
 
 loopSend :: Frame -> Session -> Int -> IO Session
 loopSend _ session 0 =  do return session
@@ -155,8 +173,10 @@ portFromString s = PortNumber (fromIntegral ((read s)::Int))
 sendFrame :: Session -> Frame -> IO ()
 sendFrame session frame = put (getHandler session) frame
 
-disconnectSession :: Session -> IO ()
-disconnectSession session = close $ getHandler session
+disconnectSession :: Session -> IO Session
+disconnectSession session = do
+    close $ getHandler session
+    return (Disconnected (getLogger session))
 
 getHandler :: Session -> FrameHandler
 getHandler (Session handler _ _ _ _ _) = handler
@@ -168,10 +188,10 @@ getLogger (Disconnected logger) = logger
 getNotifier :: Session -> Notifier
 getNotifier (Session _ _ _ _ notifier _) = notifier
 
-getResponseChan :: Session -> ResponseChannel
+getResponseChan :: Session -> (SChan FrameEvt)
 getResponseChan (Session _ _ _ _ _ chan) = chan
 
-getResponseFrame :: Session -> IO Frame
+getResponseFrame :: Session -> IO FrameEvt
 getResponseFrame session = sync $ recvEvt (getResponseChan session)
 
 sLog :: Session -> String -> IO ()
