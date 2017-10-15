@@ -62,8 +62,8 @@ processInput ("connect":ip:p:[]) session@(Disconnected _) = do
             sLog session "There was a problem connecting: "
             sLog session (show body)
             return session
-        ParseError -> do
-            sLog session "There was an issue parsing the received frame"
+        ParseError msg -> do
+            sLog session $ "There was an issue parsing the received frame: " ++ msg
             return session
         GotEof -> do
             sLog session "The server disconnected before connections could be negotiated"
@@ -90,8 +90,8 @@ processInput ("disconnect":[]) session = do
             sLog session (show body)
         (NewFrame frame)               -> do
             sLog session $ "Got an unexpected frame type: " ++ (show $ getCommand frame)
-        ParseError -> do
-            sLog session "There was an issue parsing the received frame"
+        ParseError msg -> do
+            sLog session $ "There was an issue parsing the received frame: " ++ msg
         GotEof -> do
             sLog session "Server disconnected before a response was received"
     disconnectSession session
@@ -127,8 +127,8 @@ processInput ("sendr":queue:receiptId:message) session = do
         GotEof -> do
             sLog session "Server disconnected unexpectedly"
             disconnectSession session
-        ParseError -> do
-            sLog session "There was an issue parsing the received frame"
+        ParseError msg -> do
+            sLog session $ "There was an issue parsing the received frame: " ++ msg
             disconnectSession session
 
 -- send the same message n times
@@ -168,8 +168,8 @@ subscriptionListener console subChan dest subId = do
             TLog.log console $ "Server disconnected unexpectedly."
             TLog.prompt console "\nstomp> "
             return ()
-        ParseError     -> do
-            TLog.log console $ "There was an issue parsing the received frame"
+        ParseError msg -> do
+            TLog.log console $ "There was an issue parsing the received frame: " ++ msg
             TLog.prompt console "\nstomp> "
             return ()
 
