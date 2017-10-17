@@ -7,10 +7,10 @@ import Data.List (intercalate)
 import Data.Unique
 import System.IO as IO
 import Stomp.Frames
+import Stomp.Frames.Router
 import Stomp.Frames.IO
 import qualified Stomp.TLogger as TLog
 import Stomp.Util
-import FrameRouter
 
 data Session = Session FrameHandler String String TLog.Logger Notifier (SChan FrameEvt) | Disconnected TLog.Logger
 
@@ -144,7 +144,7 @@ processInput ("subscribe":_) session@(Disconnected _) = do
 processInput ("subscribe":dest:[]) session = do
     uniqueId <- newUnique
     subId    <- return (show $ hashUnique uniqueId)
-    sendFrame session $ subscribe subId dest "auto"
+    sendFrame session $ subscribe subId dest Auto
     subChan  <- requestSubscriptionEvents (getNotifier session) subId
     forkIO $ subscriptionListener (getLogger session) subChan dest subId
     return session
