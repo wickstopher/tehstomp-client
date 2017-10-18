@@ -12,7 +12,7 @@ import Stomp.Frames.IO
 import qualified Stomp.TLogger as TLog
 import Stomp.Util
 
-data Session = Session FrameHandler String String TLog.Logger Notifier (SChan FrameEvt) | Disconnected TLog.Logger
+data Session = Session FrameHandler String String TLog.Logger RequestHandler (SChan FrameEvt) | Disconnected TLog.Logger
 
 instance Show Session where
     show (Session h ip port _  _ _) = "Connected to broker at " ++ ip ++ ":" ++ port
@@ -55,9 +55,9 @@ processInput ("connect":ip:p:[]) session@(Disconnected _) = do
     case response of
         (NewFrame (Frame CONNECTED _ _)) -> do
             sLog session $ "Connected to " ++ ip ++ " on port " ++ p
-            notifier     <- initFrameRouter frameHandler
-            responseChan <- requestResponseEvents notifier
-            return $ Session frameHandler ip p (getLogger session) notifier responseChan
+            requestHandler <- initFrameRouter frameHandler
+            responseChan   <- requestResponseEvents requestHandler
+            return $ Session frameHandler ip p (getLogger session) requestHandler responseChan
         (NewFrame (Frame ERROR _ body)) -> do
             sLog session "There was a problem connecting: "
             sLog session (show body)
@@ -145,7 +145,7 @@ processInput ("subscribe":dest:[]) session = do
     uniqueId <- newUnique
     subId    <- return (show $ hashUnique uniqueId)
     sendFrame session $ subscribe subId dest Auto
-    subChan  <- requestSubscriptionEvents (getNotifier session) subId
+    subChan  <- requestSubscriptionEvents (getRequestHandler session) subId
     forkIO $ subscriptionListener (getLogger session) subChan dest subId
     return session
 
@@ -197,8 +197,8 @@ getLogger :: Session -> TLog.Logger
 getLogger (Session handle _ _ logger _ _) = logger
 getLogger (Disconnected logger) = logger
 
-getNotifier :: Session -> Notifier
-getNotifier (Session _ _ _ _ notifier _) = notifier
+getRequestHandler :: Session -> RequestHandler
+getRequestHandler (Session _ _ _ _ requestHandler _) = requestHandler
 
 getResponseChan :: Session -> (SChan FrameEvt)
 getResponseChan (Session _ _ _ _ _ chan) = chan
