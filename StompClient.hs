@@ -3,6 +3,7 @@ import Control.Concurrent
 import Control.Concurrent.TxEvent
 import Network as Network
 import Data.ByteString (hPut)
+import Data.HashMap.Strict as HM
 import Data.List (intercalate)
 import Data.Unique
 import System.IO as IO
@@ -12,13 +13,17 @@ import Stomp.Frames.IO
 import qualified Stomp.TLogger as TLog
 import Stomp.Util
 
+type Subscriptions = HashMap String (SChan FrameEvt)
+
 -- A Session is either Disconnected or represents an open connection with a STOMP broker.
-data Session = Disconnected TLog.Logger | Session FrameHandler String String TLog.Logger RequestHandler (SChan FrameEvt) 
+data Session = Disconnected TLog.Logger | Session FrameHandler String String TLog.Logger RequestHandler (SChan Event) (SChan FrameEvt) 
 
 data Event   = GotInput String
 
+data SubscriptionUpdate = Subscribed String (SChan FrameEvt) | Unsubscribed String | Received FrameEvt
+
 instance Show Session where
-    show (Session h ip port _  _ _) = "Connected to broker at " ++ ip ++ ":" ++ port
+    show (Session h ip port _  _ _ _) = "Connected to broker at " ++ ip ++ ":" ++ port
     show (Disconnected _)           = "Session is not connected"
 
 -- Initialize the client
@@ -28,6 +33,7 @@ main = do
     console   <- TLog.initLogger stdout
     eventChan <- sync newSChan 
     inputChan <- sync newSChan
+    subChan   <- sync newSChan
     forkIO $ inputLoop eventChan inputChan
     TLog.prompt console "stomp> "
     sessionLoop (Disconnected console) eventChan inputChan 
@@ -35,7 +41,7 @@ main = do
 sessionLoop :: Session -> SChan Event -> SChan String -> IO ()
 sessionLoop session eventChan inputChan = do
     event    <- sync $ recvEvt eventChan
-    session' <- processEvent event session
+    session' <- processEvent event eventChan session
     sessionLoop session' eventChan inputChan
 
 inputLoop :: SChan Event -> SChan String ->  IO ()
@@ -44,10 +50,22 @@ inputLoop eventChan inputChan = do
     sync $ (sendEvt eventChan (GotInput input)) `chooseEvt` (sendEvt inputChan input)
     inputLoop eventChan inputChan
 
-processEvent :: Event -> Session -> IO Session
-processEvent event session = case event of
+subscriptionLoop :: SChan SubscriptionUpdate -> Subscriptions -> IO ()
+subscriptionLoop subChan subscriptions = do
+    update         <- sync $ recvEvt subChan
+    subscriptions' <- handleSubscriptionUpdate update subscriptions
+    subscriptionLoop subChan subscriptions'
+
+handleSubscriptionUpdate :: SubscriptionUpdate -> Subscriptions -> IO Subscriptions
+handleSubscriptionUpdate update subs = case update of
+    Subscribed subId newChan -> return subs
+    Unsubscribed subId       -> return subs
+    Received frameEvt        -> return subs
+
+processEvent :: Event -> (SChan Event) -> Session -> IO Session
+processEvent event eventChan session = case event of
     GotInput input -> do
-        result <- try (processInput (tokenize " " input) session) :: IO (Either SomeException Session)
+        result <- try (processInput (tokenize " " input) session eventChan) :: IO (Either SomeException Session)
         session' <-
             case result of 
                 Left exception -> do
@@ -58,18 +76,18 @@ processEvent event session = case event of
         return session'
 
 -- |Process input given on the command-line
-processInput :: [String] -> Session -> IO Session
+processInput :: [String] -> Session -> (SChan Event) -> IO Session
 
 -- process blank input (return press)
-processInput [] session = do return session
+processInput [] session _ = return session
 
 -- session command
-processInput ("session":[]) session = do
+processInput ("session":[]) session eventChan = do
     sLog session $ show session
     return session
 
 -- connect command
-processInput ("connect":ip:p:[]) session@(Disconnected _) = do
+processInput ("connect":ip:p:[]) session@(Disconnected _) eventChan = do
     newHandle <- Network.connectTo ip (portFromString p)
     hSetBuffering newHandle NoBuffering
     frameHandler <- initFrameHandler newHandle
@@ -80,7 +98,7 @@ processInput ("connect":ip:p:[]) session@(Disconnected _) = do
             sLog session $ "Connected to " ++ ip ++ " on port " ++ p
             requestHandler <- initFrameRouter frameHandler
             responseChan   <- requestResponseEvents requestHandler
-            return $ Session frameHandler ip p (getLogger session) requestHandler responseChan
+            return $ Session frameHandler ip p (getLogger session) requestHandler eventChan responseChan
         (NewFrame (Frame ERROR _ body)) -> do
             sLog session "There was a problem connecting: "
             sLog session (show body)
@@ -91,15 +109,15 @@ processInput ("connect":ip:p:[]) session@(Disconnected _) = do
         GotEof -> do
             sLog session "The server disconnected before connections could be negotiated"
             return session
-processInput ("connect":_:_:[]) session = do
+processInput ("connect":_:_:[]) session _ = do
     sLog session "Please disconnect from your current session before initiating a new one"
     return session
 
 -- disconnect command
-processInput ("disconnect":[]) session@(Disconnected _) = do
+processInput ("disconnect":[]) session@(Disconnected _) _ = do
     sLog session "You are not currently connected to a session"
     return session
-processInput ("disconnect":[]) session = do
+processInput ("disconnect":[]) session _ = do
     sendFrame session $ disconnect "recv-tehstomp-disconnect"
     response <- getResponseFrame session
     case response of
@@ -119,18 +137,18 @@ processInput ("disconnect":[]) session = do
     disconnectSession session
 
 -- send command
-processInput ("send":_) session@(Disconnected _) = do
+processInput ("send":_) session@(Disconnected _) _ = do
     sLog session "You must initiate a connection before sending a message"
     return session
-processInput ("send":queue:message) session = do
+processInput ("send":queue:message) session _ = do
     sendFrame session $ sendText (intercalate " " message) queue
     return session
 
 -- sendr (send with receipt request) command
-processInput ("sendr":_) session@(Disconnected _) = do
+processInput ("sendr":_) session@(Disconnected _) _ = do
     sLog session "You must initiate a connection before sending a message"
     return session
-processInput ("sendr":queue:receiptId:message) session = do
+processInput ("sendr":queue:receiptId:message) session _ = do
     sendFrame session $ addReceiptHeader receiptId (sendText (intercalate " " message) queue)
     response <- getResponseFrame session
     case response of
@@ -154,16 +172,16 @@ processInput ("sendr":queue:receiptId:message) session = do
             disconnectSession session
 
 -- send the same message n times
-processInput ("loopsend":_) session@(Disconnected _) = do
+processInput ("loopsend":_) session@(Disconnected _) _ = do
     sLog session "You must initiate a connection before sending a message"
     return session
-processInput ("loopsend":n:q:m) session = do
+processInput ("loopsend":n:q:m) session _ = do
     loopSend (sendText (intercalate " " m) q) session (fromIntegral ((read n)::Int))
 
-processInput ("subscribe":_) session@(Disconnected _) = do
+processInput ("subscribe":_) session@(Disconnected _) _ = do
     sLog session "You must initiate a connection before adding a subscription"
     return session
-processInput ("subscribe":dest:[]) session = do
+processInput ("subscribe":dest:[]) session _ = do
     uniqueId <- newUnique
     subId    <- return (show $ hashUnique uniqueId)
     sendFrame session $ subscribe subId dest ClientIndividual
@@ -172,7 +190,7 @@ processInput ("subscribe":dest:[]) session = do
     return session
 
 -- any other input pattern is considered an error
-processInput _ session = do
+processInput _ session _ = do
     sLog session "Unrecognized or malformed command"
     return session
 
@@ -218,20 +236,20 @@ disconnectSession session = do
 
 -- |Get the FrameHandler from the Session
 getHandler :: Session -> FrameHandler
-getHandler (Session handler _ _ _ _ _) = handler
+getHandler (Session handler _ _ _ _ _ _) = handler
 
 -- |Get the (console) Logger for the Session
 getLogger :: Session -> TLog.Logger
-getLogger (Session handle _ _ logger _ _) = logger
+getLogger (Session handle _ _ logger _ _ _) = logger
 getLogger (Disconnected logger) = logger
 
 -- |Get the RequestHandler for the Session
 getRequestHandler :: Session -> RequestHandler
-getRequestHandler (Session _ _ _ _ requestHandler _) = requestHandler
+getRequestHandler (Session _ _ _ _ requestHandler _ _) = requestHandler
 
 -- |Get the FrameEvt channel for the Session
 getResponseChan :: Session -> (SChan FrameEvt)
-getResponseChan (Session _ _ _ _ _ chan) = chan
+getResponseChan (Session _ _ _ _ _ _ chan) = chan
 
 -- |Get a response Frame from the Session
 getResponseFrame :: Session -> IO FrameEvt
@@ -240,6 +258,9 @@ getResponseFrame session = sync $ recvEvt (getResponseChan session)
 -- |Log a message to the session
 sLog :: Session -> String -> IO ()
 sLog session message = TLog.log (getLogger session) message
+
+sendEvent :: Session -> Event -> IO ()
+sendEvent (Session _ _ _ _ _ eventChan _) event = sync $ sendEvt eventChan event
 
 -- |Log a message to the session, but do not append a newline character (e.g. for a prompt)
 sPrompt :: Session -> String -> IO ()
