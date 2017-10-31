@@ -18,13 +18,16 @@ type Subscriptions = HashMap String (SChan FrameEvt)
 -- A Session is either Disconnected or represents an open connection with a STOMP broker.
 data Session = Disconnected TLog.Logger | Session FrameHandler String String TLog.Logger RequestHandler (SChan Event) (SChan FrameEvt) 
 
-data Event   = GotInput String
+data Event   = GotInput String | Subscription SubscriptionUpdate
 
 data SubscriptionUpdate = Subscribed String (SChan FrameEvt) | Unsubscribed String | Received FrameEvt
 
 instance Show Session where
     show (Session h ip port _  _ _ _) = "Connected to broker at " ++ ip ++ ":" ++ port
     show (Disconnected _)           = "Session is not connected"
+
+stompPrompt :: TLog.Logger -> IO ()
+stompPrompt console = TLog.prompt console "stomp> "
 
 -- Initialize the client
 main :: IO ()
@@ -35,14 +38,15 @@ main = do
     inputChan <- sync newSChan
     subChan   <- sync newSChan
     forkIO $ inputLoop eventChan inputChan
+    forkIO $ subscriptionLoop subChan HM.empty console
     TLog.prompt console "stomp> "
-    sessionLoop (Disconnected console) eventChan inputChan 
+    sessionLoop (Disconnected console) eventChan inputChan subChan
 
-sessionLoop :: Session -> SChan Event -> SChan String -> IO ()
-sessionLoop session eventChan inputChan = do
+sessionLoop :: Session -> SChan Event -> SChan String -> SChan SubscriptionUpdate -> IO ()
+sessionLoop session eventChan inputChan subChan = do
     event    <- sync $ recvEvt eventChan
-    session' <- processEvent event eventChan session
-    sessionLoop session' eventChan inputChan
+    session' <- processEvent event eventChan subChan session
+    sessionLoop session' eventChan inputChan subChan
 
 inputLoop :: SChan Event -> SChan String ->  IO ()
 inputLoop eventChan inputChan = do
@@ -50,20 +54,39 @@ inputLoop eventChan inputChan = do
     sync $ (sendEvt eventChan (GotInput input)) `chooseEvt` (sendEvt inputChan input)
     inputLoop eventChan inputChan
 
-subscriptionLoop :: SChan SubscriptionUpdate -> Subscriptions -> IO ()
-subscriptionLoop subChan subscriptions = do
-    update         <- sync $ recvEvt subChan
-    subscriptions' <- handleSubscriptionUpdate update subscriptions
-    subscriptionLoop subChan subscriptions'
+subscriptionLoop :: SChan SubscriptionUpdate -> Subscriptions -> TLog.Logger -> IO ()
+subscriptionLoop subChan subscriptions console = do
+    update         <- sync $ (recvEvt subChan) `chooseEvt` (subChoiceEvt subscriptions)
+    subscriptions' <- handleSubscriptionUpdate update subscriptions console
+    subscriptionLoop subChan subscriptions' console
 
-handleSubscriptionUpdate :: SubscriptionUpdate -> Subscriptions -> IO Subscriptions
-handleSubscriptionUpdate update subs = case update of
-    Subscribed subId newChan -> return subs
-    Unsubscribed subId       -> return subs
-    Received frameEvt        -> return subs
+subChoiceEvt :: Subscriptions -> Evt SubscriptionUpdate
+subChoiceEvt subs = HM.foldr partialSubChoiceEvt neverEvt subs
 
-processEvent :: Event -> (SChan Event) -> Session -> IO Session
-processEvent event eventChan session = case event of
+partialSubChoiceEvt :: (SChan FrameEvt) -> Evt SubscriptionUpdate -> Evt SubscriptionUpdate
+partialSubChoiceEvt evtChan = chooseEvt $ (recvEvt evtChan) `thenEvt` (\frameEvt -> alwaysEvt (Received frameEvt))
+
+handleSubscriptionUpdate :: SubscriptionUpdate -> Subscriptions -> TLog.Logger -> IO Subscriptions
+handleSubscriptionUpdate update subs console = case update of
+    Subscribed subId newChan -> return $ HM.insert subId newChan subs
+    Unsubscribed subId       -> return $ HM.delete subId subs
+    Received frameEvt        -> do { handleFrameEvt frameEvt console ; return subs }
+
+handleFrameEvt :: FrameEvt -> TLog.Logger -> IO ()
+handleFrameEvt frameEvt console = do    
+    case frameEvt of
+        NewFrame frame -> do
+            TLog.log console $ "\n\nReceived message from destination " ++ (_getDestination frame)
+            TLog.log console (show frame)
+        GotEof         -> do
+            TLog.log console $ "Server disconnected unexpectedly."
+        ParseError msg -> do
+            TLog.log console $ "There was an issue parsing the received frame: " ++ msg
+    TLog.prompt console "\n"
+    stompPrompt console
+
+processEvent :: Event -> (SChan Event) -> (SChan SubscriptionUpdate) -> Session -> IO Session
+processEvent event eventChan subChan session = case event of
     GotInput input -> do
         result <- try (processInput (tokenize " " input) session eventChan) :: IO (Either SomeException Session)
         session' <-
@@ -74,6 +97,9 @@ processEvent event eventChan session = case event of
                 Right session'' -> return session''
         sPrompt session "stomp> "
         return session'
+    Subscription subUpdate -> do
+        sync $ sendEvt subChan subUpdate
+        return session
 
 -- |Process input given on the command-line
 processInput :: [String] -> Session -> (SChan Event) -> IO Session
@@ -181,37 +207,18 @@ processInput ("loopsend":n:q:m) session _ = do
 processInput ("subscribe":_) session@(Disconnected _) _ = do
     sLog session "You must initiate a connection before adding a subscription"
     return session
-processInput ("subscribe":dest:[]) session _ = do
+processInput ("subscribe":dest:[]) session eventChan = do
     uniqueId <- newUnique
     subId    <- return (show $ hashUnique uniqueId)
     sendFrame session $ subscribe subId dest ClientIndividual
     subChan  <- requestSubscriptionEvents (getRequestHandler session) subId
-    forkIO $ subscriptionListener (getLogger session) subChan dest subId
+    forkIO $ sync $ sendEvt eventChan (Subscription (Subscribed subId subChan))
     return session
 
 -- any other input pattern is considered an error
 processInput _ session _ = do
     sLog session "Unrecognized or malformed command"
     return session
-
-subscriptionListener :: TLog.Logger -> (SChan FrameEvt) -> String -> String -> IO ()
-subscriptionListener console subChan dest subId = do
-    frameEvt <- sync $ recvEvt subChan
-    TLog.prompt console $ "\n\n[subscription " ++ subId ++ "] "
-    case frameEvt of
-        NewFrame frame -> do
-            TLog.log console $ "Received message from destination " ++ dest
-            TLog.log console (show frame)
-            TLog.prompt console "\nstomp> "
-            subscriptionListener console subChan dest subId
-        GotEof         -> do
-            TLog.log console $ "Server disconnected unexpectedly."
-            TLog.prompt console "\nstomp> "
-            return ()
-        ParseError msg -> do
-            TLog.log console $ "There was an issue parsing the received frame: " ++ msg
-            TLog.prompt console "\nstomp> "
-            return ()
 
 -- |Send a Frame to the Session n times
 loopSend :: Frame -> Session -> Int -> IO Session
