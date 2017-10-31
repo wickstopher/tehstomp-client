@@ -15,28 +15,47 @@ import Stomp.Util
 -- A Session is either Disconnected or represents an open connection with a STOMP broker.
 data Session = Disconnected TLog.Logger | Session FrameHandler String String TLog.Logger RequestHandler (SChan FrameEvt) 
 
+data Event   = GotInput String
+
 instance Show Session where
     show (Session h ip port _  _ _) = "Connected to broker at " ++ ip ++ ":" ++ port
     show (Disconnected _)           = "Session is not connected"
 
 -- Initialize the client
-main :: IO Session
+main :: IO ()
 main = do
     hSetBuffering stdout NoBuffering
-    console  <- TLog.initLogger stdout
-    promptLoop $ Disconnected console
+    console   <- TLog.initLogger stdout
+    eventChan <- sync newSChan 
+    inputChan <- sync newSChan
+    forkIO $ inputLoop eventChan inputChan
+    TLog.prompt console "stomp> "
+    sessionLoop (Disconnected console) eventChan inputChan 
 
--- Loops, prompting the user for input from stdin.
-promptLoop :: Session -> IO Session
-promptLoop session = do
-    sPrompt session "stomp> "
+sessionLoop :: Session -> SChan Event -> SChan String -> IO ()
+sessionLoop session eventChan inputChan = do
+    event    <- sync $ recvEvt eventChan
+    session' <- processEvent event session
+    sessionLoop session' eventChan inputChan
+
+inputLoop :: SChan Event -> SChan String ->  IO ()
+inputLoop eventChan inputChan = do
     input <- getLine
-    result <- try (processInput (tokenize " " input) session) :: IO (Either SomeException Session)
-    case result of 
-        Left exception -> do
-            sLog session ("[ERROR] " ++ (show exception))
-            promptLoop session
-        Right session' -> promptLoop session'
+    sync $ (sendEvt eventChan (GotInput input)) `chooseEvt` (sendEvt inputChan input)
+    inputLoop eventChan inputChan
+
+processEvent :: Event -> Session -> IO Session
+processEvent event session = case event of
+    GotInput input -> do
+        result <- try (processInput (tokenize " " input) session) :: IO (Either SomeException Session)
+        session' <-
+            case result of 
+                Left exception -> do
+                    sLog session ("[ERROR] " ++ (show exception))
+                    return session
+                Right session'' -> return session''
+        sPrompt session "stomp> "
+        return session'
 
 -- |Process input given on the command-line
 processInput :: [String] -> Session -> IO Session
@@ -147,7 +166,7 @@ processInput ("subscribe":_) session@(Disconnected _) = do
 processInput ("subscribe":dest:[]) session = do
     uniqueId <- newUnique
     subId    <- return (show $ hashUnique uniqueId)
-    sendFrame session $ subscribe subId dest Auto
+    sendFrame session $ subscribe subId dest ClientIndividual
     subChan  <- requestSubscriptionEvents (getRequestHandler session) subId
     forkIO $ subscriptionListener (getLogger session) subChan dest subId
     return session
