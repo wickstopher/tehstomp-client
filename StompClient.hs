@@ -81,22 +81,33 @@ handleFrameEvt frameEvt ackType session inputChan = do
         NewFrame frame -> do
             sLog session $ "\n\nReceived message from destination " ++ (_getDestination frame)
             sLog session (show frame)
-            handleAck frame ackType session inputChan
+            case ackType of
+                Auto -> return ()
+                _    -> handleAck frame ackType session inputChan
         GotEof         -> do
             sLog session $ "Server disconnected unexpectedly."
         ParseError msg -> do
             sLog session $ "There was an issue parsing the received frame: " ++ msg
-    sLog session "\n"
     stompPrompt (getLogger session)
 
 handleAck :: Frame -> AckType -> Session -> SChan String -> IO ()
 handleAck frame ackType session inputChan = do
-    sPrompt session "\nWould you like to acknowledge the frame? [y/n] "
+    sPrompt session "\nWould you like to acknowledge the frame? [y(es)/n(o)/i(gnore)] "
     input <- sync $ recvEvt inputChan
     case input of
-        "y" -> return ()
-        "n" -> return ()
+        "y" -> sendAck frame session
+        "n" -> sendNack frame session
+        "i" -> return ()
         _   -> do { sLog session "Invalid response" ; handleAck frame ackType session inputChan }
+
+
+sendAck :: Frame -> Session -> IO ()
+sendAck frame session = do
+    sendFrame session $ ack (_getAck frame)
+
+sendNack :: Frame -> Session -> IO ()
+sendNack frame session = do
+    sendFrame session $ nack (_getAck frame)
 
 
 processEvent :: Event -> SChan Event -> SChan SubscriptionUpdate -> SChan String -> Session -> IO Session
