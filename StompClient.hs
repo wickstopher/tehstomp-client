@@ -21,7 +21,7 @@ data Subscription = Subscription (SChan FrameEvt) AckType
 -- A Session is either Disconnected or represents an open connection with a STOMP broker.
 data Session = Disconnected TLog.Logger | Session FrameHandler String String TLog.Logger RequestHandler (SChan Event) (SChan FrameEvt) 
 
-data Event   = GotInput String | SubUpdate SubscriptionUpdate
+data Event   = GotInput String | GotFrameEvt FrameEvt AckType
 
 data SubscriptionUpdate = Subscribed SubId Subscription | Unsubscribed String | Received FrameEvt AckType
 
@@ -41,14 +41,14 @@ main = do
     inputChan <- sync newSChan
     subChan   <- sync newSChan
     forkIO $ inputLoop eventChan inputChan
-    forkIO $ subscriptionLoop subChan HM.empty console inputChan
+    forkIO $ subscriptionLoop subChan eventChan HM.empty console
     TLog.prompt console "stomp> "
     sessionLoop (Disconnected console) eventChan inputChan subChan
 
 sessionLoop :: Session -> SChan Event -> SChan String -> SChan SubscriptionUpdate -> IO ()
 sessionLoop session eventChan inputChan subChan = do
     event    <- sync $ recvEvt eventChan
-    session' <- processEvent event eventChan subChan session
+    session' <- processEvent event eventChan subChan inputChan session
     sessionLoop session' eventChan inputChan subChan
 
 inputLoop :: SChan Event -> SChan String ->  IO ()
@@ -57,11 +57,11 @@ inputLoop eventChan inputChan = do
     sync $ (sendEvt eventChan (GotInput input)) `chooseEvt` (sendEvt inputChan input)
     inputLoop eventChan inputChan
 
-subscriptionLoop :: SChan SubscriptionUpdate -> Subscriptions -> TLog.Logger -> SChan String -> IO ()
-subscriptionLoop subChan subscriptions console inputChan = do
+subscriptionLoop :: SChan SubscriptionUpdate -> SChan Event -> Subscriptions -> TLog.Logger -> IO ()
+subscriptionLoop subChan eventChan subscriptions console  = do
     update         <- sync $ (recvEvt subChan) `chooseEvt` (subChoiceEvt subscriptions)
-    subscriptions' <- handleSubscriptionUpdate update subscriptions console inputChan
-    subscriptionLoop subChan subscriptions' console inputChan
+    subscriptions' <- handleSubscriptionUpdate update subscriptions console eventChan
+    subscriptionLoop subChan eventChan subscriptions' console
 
 subChoiceEvt :: Subscriptions -> Evt SubscriptionUpdate
 subChoiceEvt subs = HM.foldr partialSubChoiceEvt neverEvt subs
@@ -69,40 +69,40 @@ subChoiceEvt subs = HM.foldr partialSubChoiceEvt neverEvt subs
 partialSubChoiceEvt :: Subscription -> Evt SubscriptionUpdate -> Evt SubscriptionUpdate
 partialSubChoiceEvt (Subscription evtChan ackType) = chooseEvt $ (recvEvt evtChan) `thenEvt` (\frameEvt -> alwaysEvt (Received frameEvt ackType))
 
-handleSubscriptionUpdate :: SubscriptionUpdate -> Subscriptions -> TLog.Logger -> SChan String -> IO Subscriptions
-handleSubscriptionUpdate update subs console inputChan = case update of
+handleSubscriptionUpdate :: SubscriptionUpdate -> Subscriptions -> TLog.Logger -> SChan Event -> IO Subscriptions
+handleSubscriptionUpdate update subs console eventChan = case update of
     Subscribed subId newChan  -> return $ HM.insert subId newChan subs
     Unsubscribed subId        -> return $ HM.delete subId subs
-    Received frameEvt ackType -> do { handleFrameEvt frameEvt ackType console inputChan ; return subs }
+    Received frameEvt ackType -> do { sync $ sendEvt eventChan $ GotFrameEvt frameEvt ackType ; return subs }
 
-handleFrameEvt :: FrameEvt -> AckType -> TLog.Logger -> SChan String -> IO ()
-handleFrameEvt frameEvt ackType console inputChan = do    
+handleFrameEvt :: FrameEvt -> AckType -> Session -> SChan String -> IO ()
+handleFrameEvt frameEvt ackType session inputChan = do    
     case frameEvt of
         NewFrame frame -> do
-            TLog.log console $ "\n\nReceived message from destination " ++ (_getDestination frame)
-            TLog.log console (show frame)
-            handleAck frame ackType console inputChan
+            sLog session $ "\n\nReceived message from destination " ++ (_getDestination frame)
+            sLog session (show frame)
+            handleAck frame ackType session inputChan
         GotEof         -> do
-            TLog.log console $ "Server disconnected unexpectedly."
+            sLog session $ "Server disconnected unexpectedly."
         ParseError msg -> do
-            TLog.log console $ "There was an issue parsing the received frame: " ++ msg
-    TLog.prompt console "\n"
-    stompPrompt console
+            sLog session $ "There was an issue parsing the received frame: " ++ msg
+    sLog session "\n"
+    stompPrompt (getLogger session)
 
-handleAck :: Frame -> AckType -> TLog.Logger -> SChan String -> IO ()
-handleAck frame ackType console inputChan = do
-    TLog.prompt console "Would you like to acknowledge the frame? [y/n] "
+handleAck :: Frame -> AckType -> Session -> SChan String -> IO ()
+handleAck frame ackType session inputChan = do
+    sPrompt session "\nWould you like to acknowledge the frame? [y/n] "
     input <- sync $ recvEvt inputChan
     case input of
         "y" -> return ()
         "n" -> return ()
-        _   -> do { TLog.log console "Invalid response" ; handleAck frame ackType console inputChan }
+        _   -> do { sLog session "Invalid response" ; handleAck frame ackType session inputChan }
 
 
-processEvent :: Event -> (SChan Event) -> (SChan SubscriptionUpdate) -> Session -> IO Session
-processEvent event eventChan subChan session = case event of
+processEvent :: Event -> SChan Event -> SChan SubscriptionUpdate -> SChan String -> Session -> IO Session
+processEvent event eventChan subChan inputChan session = case event of
     GotInput input -> do
-        result <- try (processInput (tokenize " " input) session eventChan) :: IO (Either SomeException Session)
+        result <- try (processInput (tokenize " " input) session eventChan subChan) :: IO (Either SomeException Session)
         session' <-
             case result of 
                 Left exception -> do
@@ -111,23 +111,23 @@ processEvent event eventChan subChan session = case event of
                 Right session'' -> return session''
         sPrompt session "stomp> "
         return session'
-    SubUpdate subUpdate -> do
-        sync $ sendEvt subChan subUpdate
+    GotFrameEvt frameEvt ackType -> do
+        handleFrameEvt frameEvt ackType session inputChan
         return session
 
 -- |Process input given on the command-line
-processInput :: [String] -> Session -> (SChan Event) -> IO Session
+processInput :: [String] -> Session -> (SChan Event) -> SChan SubscriptionUpdate -> IO Session
 
 -- process blank input (return press)
-processInput [] session _ = return session
+processInput [] session _ _ = return session
 
 -- session command
-processInput ("session":[]) session eventChan = do
+processInput ("session":[]) session eventChan _ = do
     sLog session $ show session
     return session
 
 -- connect command
-processInput ("connect":ip:p:[]) session@(Disconnected _) eventChan = do
+processInput ("connect":ip:p:[]) session@(Disconnected _) eventChan _ = do
     newHandle <- Network.connectTo ip (portFromString p)
     hSetBuffering newHandle NoBuffering
     frameHandler <- initFrameHandler newHandle
@@ -149,15 +149,15 @@ processInput ("connect":ip:p:[]) session@(Disconnected _) eventChan = do
         GotEof -> do
             sLog session "The server disconnected before connections could be negotiated"
             return session
-processInput ("connect":_:_:[]) session _ = do
+processInput ("connect":_:_:[]) session _ _ = do
     sLog session "Please disconnect from your current session before initiating a new one"
     return session
 
 -- disconnect command
-processInput ("disconnect":[]) session@(Disconnected _) _ = do
+processInput ("disconnect":[]) session@(Disconnected _) _ _ = do
     sLog session "You are not currently connected to a session"
     return session
-processInput ("disconnect":[]) session _ = do
+processInput ("disconnect":[]) session _ _ = do
     sendFrame session $ disconnect "recv-tehstomp-disconnect"
     response <- getResponseFrame session
     case response of
@@ -177,18 +177,18 @@ processInput ("disconnect":[]) session _ = do
     disconnectSession session
 
 -- send command
-processInput ("send":_) session@(Disconnected _) _ = do
+processInput ("send":_) session@(Disconnected _) _ _ = do
     sLog session "You must initiate a connection before sending a message"
     return session
-processInput ("send":queue:message) session _ = do
+processInput ("send":queue:message) session _ _ = do
     sendFrame session $ sendText (intercalate " " message) queue
     return session
 
 -- sendr (send with receipt request) command
-processInput ("sendr":_) session@(Disconnected _) _ = do
+processInput ("sendr":_) session@(Disconnected _) _ _ = do
     sLog session "You must initiate a connection before sending a message"
     return session
-processInput ("sendr":queue:receiptId:message) session _ = do
+processInput ("sendr":queue:receiptId:message) session _ _ = do
     sendFrame session $ addReceiptHeader receiptId (sendText (intercalate " " message) queue)
     response <- getResponseFrame session
     case response of
@@ -212,25 +212,25 @@ processInput ("sendr":queue:receiptId:message) session _ = do
             disconnectSession session
 
 -- send the same message n times
-processInput ("loopsend":_) session@(Disconnected _) _ = do
+processInput ("loopsend":_) session@(Disconnected _) _ _ = do
     sLog session "You must initiate a connection before sending a message"
     return session
-processInput ("loopsend":n:q:m) session _ = do
+processInput ("loopsend":n:q:m) session _ _ = do
     loopSend (sendText (intercalate " " m) q) session (fromIntegral ((read n)::Int))
 
-processInput ("subscribe":_) session@(Disconnected _) _ = do
+processInput ("subscribe":_) session@(Disconnected _) _ _ = do
     sLog session "You must initiate a connection before adding a subscription"
     return session
-processInput ("subscribe":dest:[]) session eventChan = do
-    uniqueId <- newUnique
-    subId    <- return (show $ hashUnique uniqueId)
+processInput ("subscribe":dest:[]) session _ subChan = do
+    uniqueId   <- newUnique
+    subId      <- return (show $ hashUnique uniqueId)
     sendFrame session $ subscribe subId dest ClientIndividual
-    subChan  <- requestSubscriptionEvents (getRequestHandler session) subId
-    forkIO $ sync $ sendEvt eventChan (SubUpdate (Subscribed subId (Subscription subChan ClientIndividual)))
+    frameChan  <- requestSubscriptionEvents (getRequestHandler session) subId
+    forkIO $ sync $ sendEvt subChan (Subscribed subId (Subscription frameChan ClientIndividual))
     return session
 
 -- any other input pattern is considered an error
-processInput _ session _ = do
+processInput _ session _ _ = do
     sLog session "Unrecognized or malformed command"
     return session
 
