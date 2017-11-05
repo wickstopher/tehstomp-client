@@ -21,7 +21,7 @@ data Subscription = Subscription (SChan FrameEvt) AckType
 -- A Session is either Disconnected or represents an open connection with a STOMP broker.
 data Session = Disconnected TLog.Logger | Session FrameHandler String String TLog.Logger RequestHandler (SChan Event) (SChan FrameEvt) 
 
-data Event   = GotInput String | GotFrameEvt FrameEvt AckType
+data Event   = GotInput String | GotFrameEvt FrameEvt AckType | ServerDisconnect
 
 data SubscriptionUpdate = Subscribed SubId Subscription | Unsubscribed String | Received FrameEvt AckType
 
@@ -75,20 +75,21 @@ handleSubscriptionUpdate update subs console eventChan = case update of
     Unsubscribed subId        -> return $ HM.delete subId subs
     Received frameEvt ackType -> do { sync $ sendEvt eventChan $ GotFrameEvt frameEvt ackType ; return subs }
 
-handleFrameEvt :: FrameEvt -> AckType -> Session -> SChan String -> IO ()
+handleFrameEvt :: FrameEvt -> AckType -> Session -> SChan String -> IO Session
 handleFrameEvt frameEvt ackType session inputChan = do    
     case frameEvt of
         NewFrame frame -> do
             sLog session $ "\n\nReceived message from destination " ++ (_getDestination frame)
             sLog session (show frame)
             case ackType of
-                Auto -> return ()
-                _    -> handleAck frame ackType session inputChan
+                Auto -> return session
+                _    -> do { handleAck frame ackType session inputChan ; return session }
         GotEof         -> do
             sLog session $ "Server disconnected unexpectedly."
+            disconnectSession session
         ParseError msg -> do
             sLog session $ "There was an issue parsing the received frame: " ++ msg
-    stompPrompt (getLogger session)
+            return session
 
 handleAck :: Frame -> AckType -> Session -> SChan String -> IO ()
 handleAck frame ackType session inputChan = do
@@ -120,11 +121,12 @@ processEvent event eventChan subChan inputChan session = case event of
                     sLog session ("[ERROR] " ++ (show exception))
                     return session
                 Right session'' -> return session''
-        sPrompt session "stomp> "
+        stompPrompt (getLogger session')
         return session'
     GotFrameEvt frameEvt ackType -> do
-        handleFrameEvt frameEvt ackType session inputChan
-        return session
+        session' <- handleFrameEvt frameEvt ackType session inputChan
+        stompPrompt (getLogger session')
+        return session'
 
 -- |Process input given on the command-line
 processInput :: [String] -> Session -> (SChan Event) -> SChan SubscriptionUpdate -> IO Session
