@@ -16,18 +16,24 @@ import Stomp.Util
 type SubId = String
 type Subscriptions = HashMap SubId Subscription
 
-data Subscription = Subscription (SChan FrameEvt) AckType
+data Subscription = Subscription SubId String (SChan FrameEvt) AckType
 
 -- A Session is either Disconnected or represents an open connection with a STOMP broker.
-data Session = Disconnected TLog.Logger | Session FrameHandler String String TLog.Logger RequestHandler (SChan Event) (SChan FrameEvt) 
+data Session = Disconnected TLog.Logger | Session FrameHandler String String TLog.Logger RequestHandler (SChan Event) (SChan FrameEvt) | ExitApp TLog.Logger
 
 data Event   = GotInput String | GotFrameEvt FrameEvt AckType | ServerDisconnect
 
-data SubscriptionUpdate = Subscribed SubId Subscription | Unsubscribed String | Received FrameEvt AckType
+data SubscriptionUpdate = Subscribed SubId Subscription | Unsubscribed String | Received FrameEvt AckType | GetSubInfo (SChan Subscriptions)
 
 instance Show Session where
-    show (Session h ip port _  _ _ _) = "Connected to broker at " ++ ip ++ ":" ++ port
+    show (Session h ip port _ _ _ _) = "Connected to broker at " ++ ip ++ ":" ++ port
     show (Disconnected _)           = "Session is not connected"
+
+instance Show Subscription where
+    show (Subscription subId dest _ ackType) = 
+        "\nSubscription ID: " ++ subId ++ 
+        "\nDestination: " ++ dest ++ 
+        "\nAck type: " ++ (show ackType)
 
 stompPrompt :: TLog.Logger -> IO ()
 stompPrompt console = TLog.prompt console "stomp> "
@@ -49,7 +55,11 @@ sessionLoop :: Session -> SChan Event -> SChan String -> SChan SubscriptionUpdat
 sessionLoop session eventChan inputChan subChan = do
     event    <- sync $ recvEvt eventChan
     session' <- processEvent event eventChan subChan inputChan session
-    sessionLoop session' eventChan inputChan subChan
+    case session' of
+        ExitApp _ -> sLog session' "Goodbye!"
+        _         -> do
+            stompPrompt (getLogger session')
+            sessionLoop session' eventChan inputChan subChan
 
 inputLoop :: SChan Event -> SChan String ->  IO ()
 inputLoop eventChan inputChan = do
@@ -67,13 +77,14 @@ subChoiceEvt :: Subscriptions -> Evt SubscriptionUpdate
 subChoiceEvt subs = HM.foldr partialSubChoiceEvt neverEvt subs
 
 partialSubChoiceEvt :: Subscription -> Evt SubscriptionUpdate -> Evt SubscriptionUpdate
-partialSubChoiceEvt (Subscription evtChan ackType) = chooseEvt $ (recvEvt evtChan) `thenEvt` (\frameEvt -> alwaysEvt (Received frameEvt ackType))
+partialSubChoiceEvt (Subscription _ _ evtChan ackType) = chooseEvt $ (recvEvt evtChan) `thenEvt` (\frameEvt -> alwaysEvt (Received frameEvt ackType))
 
 handleSubscriptionUpdate :: SubscriptionUpdate -> Subscriptions -> TLog.Logger -> SChan Event -> IO Subscriptions
 handleSubscriptionUpdate update subs console eventChan = case update of
     Subscribed subId newChan  -> return $ HM.insert subId newChan subs
     Unsubscribed subId        -> return $ HM.delete subId subs
     Received frameEvt ackType -> do { sync $ sendEvt eventChan $ GotFrameEvt frameEvt ackType ; return subs }
+    GetSubInfo responseChan   -> do { sync $ sendEvt responseChan subs ; return subs }
 
 handleFrameEvt :: FrameEvt -> AckType -> Session -> SChan String -> IO Session
 handleFrameEvt frameEvt ackType session inputChan = do    
@@ -121,11 +132,9 @@ processEvent event eventChan subChan inputChan session = case event of
                     sLog session ("[ERROR] " ++ (show exception))
                     return session
                 Right session'' -> return session''
-        stompPrompt (getLogger session')
         return session'
     GotFrameEvt frameEvt ackType -> do
         session' <- handleFrameEvt frameEvt ackType session inputChan
-        stompPrompt (getLogger session')
         return session'
 
 -- |Process input given on the command-line
@@ -170,24 +179,7 @@ processInput ("connect":_:_:[]) session _ _ = do
 processInput ("disconnect":[]) session@(Disconnected _) _ _ = do
     sLog session "You are not currently connected to a session"
     return session
-processInput ("disconnect":[]) session _ _ = do
-    sendFrame session $ disconnect "recv-tehstomp-disconnect"
-    response <- getResponseFrame session
-    case response of
-        (NewFrame frame@(Frame RECEIPT _ _)) -> do
-            case (getReceiptId frame) of 
-                Just "recv-tehstomp-disconnect" -> sLog session "Successfully disconnected from the session"
-                otherwise                       -> sLog session $ (show frame) -- TODO: throw Exception here?
-        (NewFrame (Frame ERROR _ body)) -> do
-            sLog session "There was a problem: "
-            sLog session (show body)
-        (NewFrame frame)               -> do
-            sLog session $ "Got an unexpected frame type: " ++ (show $ getCommand frame)
-        ParseError msg -> do
-            sLog session $ "There was an issue parsing the received frame: " ++ msg
-        GotEof -> do
-            sLog session "Server disconnected before a response was received"
-    disconnectSession session
+processInput ("disconnect":[]) session _ _ = gracefulDisconnect session
 
 -- send command
 processInput ("send":_) session@(Disconnected _) _ _ = do
@@ -239,13 +231,60 @@ processInput ("subscribe":dest:[]) session _ subChan = do
     subId      <- return (show $ hashUnique uniqueId)
     sendFrame session $ subscribe subId dest ClientIndividual
     frameChan  <- requestSubscriptionEvents (getRequestHandler session) subId
-    forkIO $ sync $ sendEvt subChan (Subscribed subId (Subscription frameChan ClientIndividual))
+    forkIO $ sync $ sendEvt subChan (Subscribed subId (Subscription subId dest frameChan ClientIndividual))
     return session
+
+processInput ("unsubscribe":_) session@(Disconnected _) _ _ = do
+    sLog session "You must initiate a connection before unsubscribing"
+    return session
+processInput ("unsubscribe":subId:[]) session _ subChan = do
+    sendFrame session $ unsubscribe subId
+    forkIO $ sync $ sendEvt subChan (Unsubscribed subId)
+    return session
+
+processInput ("subs":_) session@(Disconnected _) _ _ = do
+    sLog session "You must initiate a connection first"
+    return session
+processInput ("subs":[]) session _ subChan = do
+    responseChan  <- sync newSChan
+    sync $ sendEvt subChan (GetSubInfo responseChan)
+    subscriptions <- sync $ recvEvt responseChan
+    sLog session $ "\nTotal subscriptions: " ++ (show $ HM.size subscriptions)
+    mapM_ (showSubInfo session) subscriptions
+    return session
+
+processInput ("exit":_) session eventChan _ = do
+    gracefulDisconnect session
+    return $ ExitApp (getLogger session)
 
 -- any other input pattern is considered an error
 processInput _ session _ _ = do
     sLog session "Unrecognized or malformed command"
     return session
+
+gracefulDisconnect :: Session -> IO Session
+gracefulDisconnect session@(Session _ _ _ _ _ _ _) = do
+    sendFrame session $ disconnect "recv-tehstomp-disconnect"
+    response <- getResponseFrame session
+    case response of
+        (NewFrame frame@(Frame RECEIPT _ _)) -> do
+            case (getReceiptId frame) of 
+                Just "recv-tehstomp-disconnect" -> sLog session "Successfully disconnected from the session"
+                otherwise                       -> sLog session $ (show frame) -- TODO: throw Exception here?
+        (NewFrame (Frame ERROR _ body)) -> do
+            sLog session "There was a problem: "
+            sLog session (show body)
+        (NewFrame frame)               -> do
+            sLog session $ "Got an unexpected frame type: " ++ (show $ getCommand frame)
+        ParseError msg -> do
+            sLog session $ "There was an issue parsing the received frame: " ++ msg
+        GotEof -> do
+            sLog session "Server disconnected before a response was received"
+    disconnectSession session
+gracefulDisconnect session = return session
+
+showSubInfo :: Session -> Subscription -> IO ()
+showSubInfo session subscription = sLog session (show subscription)
 
 -- |Send a Frame to the Session n times
 loopSend :: Frame -> Session -> Int -> IO Session
@@ -264,9 +303,11 @@ sendFrame session frame = put (getHandler session) frame
 
 -- |Disconnect the Session
 disconnectSession :: Session -> IO Session
-disconnectSession session = do
-    close $ getHandler session
-    return (Disconnected (getLogger session))
+disconnectSession session = case session of
+    (Session _ _ _ _ _ _ _ ) -> do
+        close $ getHandler session
+        return (Disconnected (getLogger session))
+    _ -> return session
 
 -- |Get the FrameHandler from the Session
 getHandler :: Session -> FrameHandler
@@ -276,6 +317,7 @@ getHandler (Session handler _ _ _ _ _ _) = handler
 getLogger :: Session -> TLog.Logger
 getLogger (Session handle _ _ logger _ _ _) = logger
 getLogger (Disconnected logger) = logger
+getLogger (ExitApp      logger) = logger
 
 -- |Get the RequestHandler for the Session
 getRequestHandler :: Session -> RequestHandler
