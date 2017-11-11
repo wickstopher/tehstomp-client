@@ -7,26 +7,30 @@ import Data.HashMap.Strict as HM
 import Data.List (intercalate)
 import Data.Unique
 import System.IO as IO
-import Stomp.Frames
+import Stomp.Frames hiding (getTransaction)
 import Stomp.Frames.Router
 import Stomp.Frames.IO
 import qualified Stomp.TLogger as TLog
 import Stomp.Util
 
 type SubId = String
+type TxId  = String
 type Subscriptions = HashMap SubId Subscription
+type Transactions  = [TxId]
 
 data Subscription = Subscription SubId String (SChan FrameEvt) AckType
 
 -- A Session is either Disconnected or represents an open connection with a STOMP broker.
-data Session = Disconnected TLog.Logger | Session FrameHandler String String TLog.Logger RequestHandler (SChan Event) (SChan FrameEvt) | ExitApp TLog.Logger
+data Session = Disconnected TLog.Logger | 
+               Session FrameHandler String String TLog.Logger RequestHandler (Maybe TxId) (SChan Event) (SChan FrameEvt) | 
+               ExitApp TLog.Logger
 
 data Event   = GotInput String | GotFrameEvt FrameEvt AckType | ServerDisconnect
 
 data SubscriptionUpdate = Subscribed SubId Subscription | Unsubscribed String | Received FrameEvt AckType | GetSubInfo (SChan Subscriptions)
 
 instance Show Session where
-    show (Session h ip port _ _ _ _) = "Connected to broker at " ++ ip ++ ":" ++ port
+    show (Session h ip port _ _ _ _ _) = "Connected to broker at " ++ ip ++ ":" ++ port
     show (Disconnected _)           = "Session is not connected"
 
 instance Show Subscription where
@@ -160,7 +164,7 @@ processInput ("connect":ip:p:[]) session@(Disconnected _) eventChan _ = do
             sLog session $ "Connected to " ++ ip ++ " on port " ++ p
             requestHandler <- initFrameRouter frameHandler
             responseChan   <- requestResponseEvents requestHandler
-            return $ Session frameHandler ip p (getLogger session) requestHandler eventChan responseChan
+            return $ Session frameHandler ip p (getLogger session) requestHandler Nothing eventChan responseChan
         (NewFrame (Frame ERROR _ body)) -> do
             sLog session "There was a problem connecting: "
             sLog session (show body)
@@ -186,7 +190,7 @@ processInput ("send":_) session@(Disconnected _) _ _ = do
     sLog session "You must initiate a connection before sending a message"
     return session
 processInput ("send":queue:message) session _ _ = do
-    sendFrame session $ sendText (intercalate " " message) queue
+    sendFrame session $ addTransactionHeaderIfNeeded (sendText (intercalate " " message) queue) session
     return session
 
 -- sendr (send with receipt request) command
@@ -194,7 +198,8 @@ processInput ("sendr":_) session@(Disconnected _) _ _ = do
     sLog session "You must initiate a connection before sending a message"
     return session
 processInput ("sendr":queue:receiptId:message) session _ _ = do
-    sendFrame session $ addReceiptHeader receiptId (sendText (intercalate " " message) queue)
+    frame <- return $ addReceiptHeader receiptId (sendText (intercalate " " message) queue)
+    sendFrame session (addTransactionHeaderIfNeeded frame session)
     response <- getResponseFrame session
     case response of
         (NewFrame frame@(Frame RECEIPT _ _)) -> do
@@ -242,6 +247,42 @@ processInput ("unsubscribe":subId:[]) session _ subChan = do
     forkIO $ sync $ sendEvt subChan (Unsubscribed subId)
     return session
 
+processInput ("begin":_) session@(Disconnected _) _ _ = do
+    sLog session "You must initiate a connection before initiating a transaction"
+    return session
+processInput ("begin":txid:[]) session _ _ =
+    case getTransaction session of
+        Just txid -> do
+            sLog session $ "Transaction " ++ txid ++ " is already in progress!"
+            return session
+        Nothing -> do
+            sendFrame session $ begin txid
+            sLog session $ "Initialized new transaction with transaction id " ++ txid
+            return (newTransaction session txid)
+
+processInput ("commit":_) session@(Disconnected _) _ _ = do
+    sLog session "You must initiate a connection before committing a transaction"
+    return session
+processInput ("commit":[]) session _ _ =
+    case getTransaction session of
+        Just txid -> do
+            sendFrame session $ commit txid
+            sLog session $ "Committed transaction with transaction id " ++ txid
+            return $ endTransaction session
+        Nothing -> do
+            sLog session "There is no transaction in progress"
+            return session
+
+processInput ("abort":_) session@(Disconnected _) _ _ = do
+    sLog session "You must initiate a connection before aborting a transaction"
+    return session
+processInput ("abort":[]) session _ _ =
+    case getTransaction session of
+        Just txid -> do
+            sendFrame session $ abort txid
+            sLog session $ "Aborted transaction with transaction id " ++ txid
+            return $ endTransaction session
+
 processInput ("subs":_) session@(Disconnected _) _ _ = do
     sLog session "You must initiate a connection first"
     return session
@@ -263,7 +304,9 @@ processInput _ session _ _ = do
     return session
 
 gracefulDisconnect :: Session -> IO Session
-gracefulDisconnect session@(Session _ _ _ _ _ _ _) = do
+gracefulDisconnect session@(Disconnected _) = return session
+gracefulDisconnect session@(ExitApp _)      = return session
+gracefulDisconnect session                  = do
     sendFrame session $ disconnect "recv-tehstomp-disconnect"
     response <- getResponseFrame session
     case response of
@@ -281,7 +324,6 @@ gracefulDisconnect session@(Session _ _ _ _ _ _ _) = do
         GotEof -> do
             sLog session "Server disconnected before a response was received"
     disconnectSession session
-gracefulDisconnect session = return session
 
 showSubInfo :: Session -> Subscription -> IO ()
 showSubInfo session subscription = sLog session (show subscription)
@@ -304,28 +346,28 @@ sendFrame session frame = put (getHandler session) frame
 -- |Disconnect the Session
 disconnectSession :: Session -> IO Session
 disconnectSession session = case session of
-    (Session _ _ _ _ _ _ _ ) -> do
+    (Session _ _ _ _ _ _ _ _) -> do
         close $ getHandler session
         return (Disconnected (getLogger session))
     _ -> return session
 
 -- |Get the FrameHandler from the Session
 getHandler :: Session -> FrameHandler
-getHandler (Session handler _ _ _ _ _ _) = handler
+getHandler (Session handler _ _ _ _ _ _ _) = handler
 
 -- |Get the (console) Logger for the Session
 getLogger :: Session -> TLog.Logger
-getLogger (Session handle _ _ logger _ _ _) = logger
+getLogger (Session handle _ _ logger _ _ _ _) = logger
 getLogger (Disconnected logger) = logger
 getLogger (ExitApp      logger) = logger
 
 -- |Get the RequestHandler for the Session
 getRequestHandler :: Session -> RequestHandler
-getRequestHandler (Session _ _ _ _ requestHandler _ _) = requestHandler
+getRequestHandler (Session _ _ _ _ requestHandler _ _ _) = requestHandler
 
 -- |Get the FrameEvt channel for the Session
 getResponseChan :: Session -> (SChan FrameEvt)
-getResponseChan (Session _ _ _ _ _ _ chan) = chan
+getResponseChan (Session _ _ _ _ _ _ _ chan) = chan
 
 -- |Get a response Frame from the Session
 getResponseFrame :: Session -> IO FrameEvt
@@ -336,8 +378,21 @@ sLog :: Session -> String -> IO ()
 sLog session message = TLog.log (getLogger session) message
 
 sendEvent :: Session -> Event -> IO ()
-sendEvent (Session _ _ _ _ _ eventChan _) event = sync $ sendEvt eventChan event
+sendEvent (Session _ _ _ _ _ _ eventChan _) event = sync $ sendEvt eventChan event
 
 -- |Log a message to the session, but do not append a newline character (e.g. for a prompt)
 sPrompt :: Session -> String -> IO ()
 sPrompt session message = TLog.prompt (getLogger session) message
+
+newTransaction :: Session -> TxId -> Session
+newTransaction (Session fh ip p logger rh _ eventChan frameChan) txid = Session fh ip p logger rh (Just txid) eventChan frameChan
+
+endTransaction :: Session -> Session
+endTransaction (Session fh ip p logger rh _ eventChan frameChan) = Session fh ip p logger rh Nothing eventChan frameChan
+
+getTransaction :: Session -> Maybe TxId
+getTransaction (Session _ _ _ _ _ tx _ _) = tx
+
+addTransactionHeaderIfNeeded :: Frame -> Session -> Frame
+addTransactionHeaderIfNeeded frame (Session _ _ _ _ _ Nothing _ _) = frame
+addTransactionHeaderIfNeeded frame (Session _ _ _ _ _ (Just txid) _ _) = addFrameHeaderFront (txHeader txid) frame
