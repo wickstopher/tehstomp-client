@@ -282,6 +282,9 @@ processInput ("abort":[]) session _ _ =
             sendFrame session $ abort txid
             sLog session $ "Aborted transaction with transaction id " ++ txid
             return $ endTransaction session
+        Nothing   -> do
+            sLog session "There is no transaction in progress"
+            return session
 
 processInput ("subs":_) session@(Disconnected _) _ _ = do
     sLog session "You must initiate a connection first"
