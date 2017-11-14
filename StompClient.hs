@@ -99,6 +99,7 @@ handleFrameEvt frameEvt ackType session inputChan = do
             case ackType of
                 Auto -> return session
                 _    -> do { handleAck frame ackType session inputChan ; return session }
+        Heartbeat      -> return session
         GotEof         -> do
             sLog session $ "Server disconnected unexpectedly."
             disconnectSession session
@@ -157,11 +158,13 @@ processInput ("connect":ip:p:[]) session@(Disconnected _) eventChan _ = do
     newHandle <- Network.connectTo ip (portFromString p)
     hSetBuffering newHandle NoBuffering
     frameHandler <- initFrameHandler newHandle
-    put frameHandler $ connect "nohost"
+    put frameHandler $ connect "nohost" 4000 0
     response <- get frameHandler
     case response of
-        (NewFrame (Frame CONNECTED _ _)) -> do
+        (NewFrame frame@(Frame CONNECTED _ _)) -> do
             sLog session $ "Connected to " ++ ip ++ " on port " ++ p
+            (serverSend, clientSend) <- return $ getHeartbeat frame
+            updateHeartbeat frameHandler (1000 * clientSend)
             requestHandler <- initFrameRouter frameHandler
             responseChan   <- requestResponseEvents requestHandler
             return $ Session frameHandler ip p (getLogger session) requestHandler Nothing eventChan responseChan
@@ -213,6 +216,9 @@ processInput ("sendr":queue:receiptId:message) session _ _ = do
             return session
         (NewFrame frame) -> do
             sLog session $ "Got an unexpected frame type: " ++ (show $ getCommand frame)
+            return session
+        Heartbeat -> do
+            sLog session $ "Got hearbeat from server"
             return session
         GotEof -> do
             sLog session "Server disconnected unexpectedly"
@@ -322,6 +328,8 @@ gracefulDisconnect session                  = do
             sLog session (show body)
         (NewFrame frame)               -> do
             sLog session $ "Got an unexpected frame type: " ++ (show $ getCommand frame)
+        Heartbeat -> do
+            sLog session "Got a heartbeat from the server"
         ParseError msg -> do
             sLog session $ "There was an issue parsing the received frame: " ++ msg
         GotEof -> do
