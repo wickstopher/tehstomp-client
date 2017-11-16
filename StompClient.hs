@@ -13,21 +13,30 @@ import Stomp.Frames.IO
 import qualified Stomp.TLogger as TLog
 import Stomp.Util
 
+-- |A SubId represents a unique subscription identifier
 type SubId = String
-type TxId  = String
-type Subscriptions = HashMap SubId Subscription
-type Transactions  = [TxId]
 
+-- |A TxId represents a unique transaction identifier
+type TxId  = String
+
+-- |A HashMap which contains mappings from SubIds to active subscriptions
+type Subscriptions = HashMap SubId Subscription
+
+-- |Represents an active client subscription
 data Subscription = Subscription SubId String (SChan FrameEvt) AckType
 
--- A Session is either Disconnected or represents an open connection with a STOMP broker.
+-- |A Session is either Disconnected or represents an open connection with a STOMP broker. ExitApp indicates that the application should exit.
 data Session = Disconnected TLog.Logger | 
                Session FrameHandler String String TLog.Logger RequestHandler (Maybe TxId) (SChan Event) (SChan FrameEvt) | 
                ExitApp TLog.Logger
 
+-- |Indicates the types of event that can be processed by the main loop.
 data Event   = GotInput String | GotFrameEvt FrameEvt AckType | ServerDisconnect
 
-data SubscriptionUpdate = Subscribed SubId Subscription | Unsubscribed String | Received FrameEvt AckType | GetSubInfo (SChan Subscriptions)
+data SubscriptionUpdate = Subscribed SubId Subscription | 
+                          Unsubscribed String | 
+                          Received FrameEvt AckType | 
+                          GetSubInfo (SChan Subscriptions)
 
 instance Show Session where
     show (Session h ip port _ _ _ _ _) = "Connected to broker at " ++ ip ++ ":" ++ port
@@ -39,10 +48,11 @@ instance Show Subscription where
         "\nDestination: " ++ dest ++ 
         "\nAck type: " ++ (show ackType)
 
+-- |Given a Logger, display a "stomp> " prompt
 stompPrompt :: TLog.Logger -> IO ()
 stompPrompt console = TLog.prompt console "stomp> "
 
--- Initialize the client
+-- |Initialize the client
 main :: IO ()
 main = do
     hSetBuffering stdout NoBuffering
@@ -55,6 +65,7 @@ main = do
     TLog.prompt console "stomp> "
     sessionLoop (Disconnected console) eventChan inputChan subChan
 
+-- |Stateful loop that tracks session information
 sessionLoop :: Session -> SChan Event -> SChan String -> SChan SubscriptionUpdate -> IO ()
 sessionLoop session eventChan inputChan subChan = do
     event    <- sync $ recvEvt eventChan
@@ -65,24 +76,32 @@ sessionLoop session eventChan inputChan subChan = do
             stompPrompt (getLogger session')
             sessionLoop session' eventChan inputChan subChan
 
+-- |Blocks waiting for input from stdin. When a line of input is received, sends an event on the appropriate channel.
+-- The 'eventChan' is for the main prompt workflow; the inputChan is for nested prompts triggered by other events,
+-- e.g. when frame processing requires the user to send an acknowledgement.
 inputLoop :: SChan Event -> SChan String ->  IO ()
 inputLoop eventChan inputChan = do
     input <- getLine
     sync $ (sendEvt eventChan (GotInput input)) `chooseEvt` (sendEvt inputChan input)
     inputLoop eventChan inputChan
 
+-- |State management loop that holds the active Subscriptions for the session and handles updates as they are received
+-- on the subscription channels.
 subscriptionLoop :: SChan SubscriptionUpdate -> SChan Event -> Subscriptions -> TLog.Logger -> IO ()
 subscriptionLoop subChan eventChan subscriptions console  = do
     update         <- sync $ (recvEvt subChan) `chooseEvt` (subChoiceEvt subscriptions)
     subscriptions' <- handleSubscriptionUpdate update subscriptions console eventChan
     subscriptionLoop subChan eventChan subscriptions' console
 
+-- |Composite subscription choice event to receive a subscription update on any of the available channels.
 subChoiceEvt :: Subscriptions -> Evt SubscriptionUpdate
 subChoiceEvt subs = HM.foldr partialSubChoiceEvt neverEvt subs
 
+-- |Partial Evt function to build a composite subscription choice event.
 partialSubChoiceEvt :: Subscription -> Evt SubscriptionUpdate -> Evt SubscriptionUpdate
 partialSubChoiceEvt (Subscription _ _ evtChan ackType) = chooseEvt $ (recvEvt evtChan) `thenEvt` (\frameEvt -> alwaysEvt (Received frameEvt ackType))
 
+-- |Handle a SubscriptionUpdate.
 handleSubscriptionUpdate :: SubscriptionUpdate -> Subscriptions -> TLog.Logger -> SChan Event -> IO Subscriptions
 handleSubscriptionUpdate update subs console eventChan = case update of
     Subscribed subId newChan  -> return $ HM.insert subId newChan subs
@@ -90,6 +109,7 @@ handleSubscriptionUpdate update subs console eventChan = case update of
     Received frameEvt ackType -> do { sync $ sendEvt eventChan $ GotFrameEvt frameEvt ackType ; return subs }
     GetSubInfo responseChan   -> do { sync $ sendEvt responseChan subs ; return subs }
 
+-- |Handle a FrameEvt
 handleFrameEvt :: FrameEvt -> AckType -> Session -> SChan String -> IO Session
 handleFrameEvt frameEvt ackType session inputChan = do    
     case frameEvt of
@@ -107,6 +127,7 @@ handleFrameEvt frameEvt ackType session inputChan = do
             sLog session $ "There was an issue parsing the received frame: " ++ msg
             return session
 
+-- |Handle acknowledgement for a given Frame
 handleAck :: Frame -> AckType -> Session -> SChan String -> IO ()
 handleAck frame ackType session inputChan = do
     sPrompt session "\nWould you like to acknowledge the frame? [y(es)/n(o)/i(gnore)] "
@@ -117,16 +138,17 @@ handleAck frame ackType session inputChan = do
         "i" -> return ()
         _   -> do { sLog session "Invalid response" ; handleAck frame ackType session inputChan }
 
-
+-- |Send an ACK response for a given Frame
 sendAck :: Frame -> Session -> IO ()
 sendAck frame session = do
     sendFrame session $ ack (_getAck frame)
 
+-- |Send a NACK response for a given Frame
 sendNack :: Frame -> Session -> IO ()
 sendNack frame session = do
     sendFrame session $ nack (_getAck frame)
 
-
+-- |Process an Event and return the updated Session that is the result of said processing.
 processEvent :: Event -> SChan Event -> SChan SubscriptionUpdate -> SChan String -> Session -> IO Session
 processEvent event eventChan subChan inputChan session = case event of
     GotInput input -> do
@@ -234,6 +256,7 @@ processInput ("loopsend":_) session@(Disconnected _) _ _ = do
 processInput ("loopsend":n:q:m) session _ _ = do
     loopSend (sendText (intercalate " " m) q) session (fromIntegral ((read n)::Int))
 
+-- subscribe to a new destination
 processInput ("subscribe":_) session@(Disconnected _) _ _ = do
     sLog session "You must initiate a connection before adding a subscription"
     return session
@@ -245,6 +268,7 @@ processInput ("subscribe":dest:[]) session _ subChan = do
     forkIO $ sync $ sendEvt subChan (Subscribed subId (Subscription subId dest frameChan ClientIndividual))
     return session
 
+-- unsubscribe from a destination
 processInput ("unsubscribe":_) session@(Disconnected _) _ _ = do
     sLog session "You must initiate a connection before unsubscribing"
     return session
@@ -253,6 +277,7 @@ processInput ("unsubscribe":subId:[]) session _ subChan = do
     forkIO $ sync $ sendEvt subChan (Unsubscribed subId)
     return session
 
+-- begin a transaction; all "send" commands between this command and a subsequent abort or commit will be part of the transaction.
 processInput ("begin":_) session@(Disconnected _) _ _ = do
     sLog session "You must initiate a connection before initiating a transaction"
     return session
@@ -266,6 +291,7 @@ processInput ("begin":txid:[]) session _ _ =
             sLog session $ "Initialized new transaction with transaction id " ++ txid
             return (newTransaction session txid)
 
+-- commit a transaction
 processInput ("commit":_) session@(Disconnected _) _ _ = do
     sLog session "You must initiate a connection before committing a transaction"
     return session
@@ -279,6 +305,7 @@ processInput ("commit":[]) session _ _ =
             sLog session "There is no transaction in progress"
             return session
 
+-- abort the active transaction
 processInput ("abort":_) session@(Disconnected _) _ _ = do
     sLog session "You must initiate a connection before aborting a transaction"
     return session
@@ -292,6 +319,7 @@ processInput ("abort":[]) session _ _ =
             sLog session "There is no transaction in progress"
             return session
 
+-- list active subscriptions
 processInput ("subs":_) session@(Disconnected _) _ _ = do
     sLog session "You must initiate a connection first"
     return session
@@ -303,6 +331,7 @@ processInput ("subs":[]) session _ subChan = do
     mapM_ (showSubInfo session) subscriptions
     return session
 
+-- exit the application
 processInput ("exit":_) session eventChan _ = do
     gracefulDisconnect session
     return $ ExitApp (getLogger session)
@@ -312,6 +341,7 @@ processInput _ session _ _ = do
     sLog session "Unrecognized or malformed command"
     return session
 
+-- |Disconnect gracefully from a session
 gracefulDisconnect :: Session -> IO Session
 gracefulDisconnect session@(Disconnected _) = return session
 gracefulDisconnect session@(ExitApp _)      = return session
@@ -336,6 +366,7 @@ gracefulDisconnect session                  = do
             sLog session "Server disconnected before a response was received"
     disconnectSession session
 
+-- log the information for one Subscription
 showSubInfo :: Session -> Subscription -> IO ()
 showSubInfo session subscription = sLog session (show subscription)
 
@@ -388,22 +419,23 @@ getResponseFrame session = sync $ recvEvt (getResponseChan session)
 sLog :: Session -> String -> IO ()
 sLog session message = TLog.log (getLogger session) message
 
-sendEvent :: Session -> Event -> IO ()
-sendEvent (Session _ _ _ _ _ _ eventChan _) event = sync $ sendEvt eventChan event
-
 -- |Log a message to the session, but do not append a newline character (e.g. for a prompt)
 sPrompt :: Session -> String -> IO ()
 sPrompt session message = TLog.prompt (getLogger session) message
 
+-- |Add the TxId to the Session
 newTransaction :: Session -> TxId -> Session
 newTransaction (Session fh ip p logger rh _ eventChan frameChan) txid = Session fh ip p logger rh (Just txid) eventChan frameChan
 
+-- |Remove the TxId from the Session
 endTransaction :: Session -> Session
 endTransaction (Session fh ip p logger rh _ eventChan frameChan) = Session fh ip p logger rh Nothing eventChan frameChan
 
+-- |Get the TxId for the Session
 getTransaction :: Session -> Maybe TxId
 getTransaction (Session _ _ _ _ _ tx _ _) = tx
 
+-- |If the Session is currently in the midst of a transaction, add the transaction header
 addTransactionHeaderIfNeeded :: Frame -> Session -> Frame
 addTransactionHeaderIfNeeded frame (Session _ _ _ _ _ Nothing _ _) = frame
 addTransactionHeaderIfNeeded frame (Session _ _ _ _ _ (Just txid) _ _) = addFrameHeaderFront (txHeader txid) frame
