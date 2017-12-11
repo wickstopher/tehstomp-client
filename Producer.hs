@@ -36,6 +36,5 @@ portFromString :: String -> PortID
 portFromString s = PortNumber (fromIntegral ((read s)::Int))
 
 processArgs :: [String] -> IO (HostName, String, String, Int)
-processArgs (s:[]) = return ("localhost", "2323", s, -1)
 processArgs(s:n:[]) = return ("localhost", "2323", s, (read n)::Int)
-processArgs _ = return ("localhost", "2323", "q1", -1)
+processArgs _ = error "Usage: producer <dest> <n>"

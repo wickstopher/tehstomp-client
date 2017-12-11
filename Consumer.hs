@@ -35,7 +35,7 @@ receiveLoop frameHandler incrementer = do
 
 processArgs :: [String] -> IO (HostName, String, String)
 processArgs (s:[]) = return ("localhost", "2323", s)
-processArgs _ = return ("localhost", "2323", "q1")
+processArgs _ = error "Usage: consumer <dest>"
 
 -- |Convert a String to a PortID
 portFromString :: String -> PortID
