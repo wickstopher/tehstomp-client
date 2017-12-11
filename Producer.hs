@@ -7,7 +7,7 @@ import System.IO
 main :: IO ()
 main = do
     args <- getArgs
-    (ip, port, dest) <- processArgs args
+    (ip, port, dest, n) <- processArgs args
     handle <- Network.connectTo ip (portFromString port)
     hSetBuffering handle NoBuffering
     frameHandler <- initFrameHandler handle
@@ -16,12 +16,9 @@ main = do
     case response of 
         (NewFrame frame@(Frame CONNECTED _ _)) -> putStrLn $ "Connected to " ++ ip ++ " on port " ++ port
         otherwise                              -> error "There was a problem initiating the connection"
-    sendLoop dest frameHandler 100000
+    sendLoop dest frameHandler n
 
-processArgs :: [String] -> IO (HostName, String, String)
-processArgs _ = return ("localhost", "2323", "q1")
-
-sendLoop :: String -> FrameHandler -> Integer -> IO ()
+sendLoop :: String -> FrameHandler -> Int -> IO ()
 sendLoop dest frameHandler n = do
     put frameHandler (sendText ("Hello, " ++ dest) dest)
     if n > 1 then
@@ -32,3 +29,8 @@ sendLoop dest frameHandler n = do
 -- |Convert a String to a PortID
 portFromString :: String -> PortID
 portFromString s = PortNumber (fromIntegral ((read s)::Int))
+
+processArgs :: [String] -> IO (HostName, String, String, Int)
+processArgs (s:[]) = return ("localhost", "2323", s, 1000)
+processArgs(s:n:[]) = return ("localhost", "2323", s, (read n)::Int)
+processArgs _ = return ("localhost", "2323", "q1", 1000)

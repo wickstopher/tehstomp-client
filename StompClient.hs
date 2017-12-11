@@ -379,7 +379,7 @@ processInput ("help":[]) session _ _ = do
 
 -- any other input pattern is considered an error
 processInput _ session _ _ = do
-    sLog session "Unrecognized or malformed command\n"
+    sLog session "Unrecognized or malformed command; use 'help' to display the list of commands\n"
     sLog session helpText
     return session
 
