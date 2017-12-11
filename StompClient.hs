@@ -53,6 +53,28 @@ instance Show Subscription where
 stompPrompt :: TLog.Logger -> IO ()
 stompPrompt console = TLog.prompt console "stomp> "
 
+helpText :: String
+helpText = "session                       Display information about the active session\n" ++
+           "subs                          Display information about the active subscriptions\n" ++
+           "connect <host> <ip>           Connect to the STOMP broker at the given host/ip\n" ++
+           "disconnect                    Gracefully terminate the active session\n" ++
+           "send <dest> <msg>             Send a message to the given destination\n" ++
+           "sendr <dest> <rid> <msg>      Send a message to the given destination and request a\n" ++
+           "                              receipt with the given receipt ID\n" ++
+           "loopsend <n> <dest> <msg>     Send a message n times to the given destination\n" ++
+           "subscribe <dest>              Subscribe to the given destination\n" ++
+           "unsubscribe <dest>|<subid>    Unsubscribe from the given destination; supports passing\n" ++
+           "                              either the destination name or subscription ID\n" ++
+           "begin <txid>                  Begin a transaction using the given transaction ID;\n" ++
+           "                              all send and sendr requests will be added to the transaction\n" ++
+           "                              until it is either commited or aborted\n" ++
+           "commit <txid>                 Commit the in-progress transaction\n" ++
+           "abort <txid>                  Abort the in-progress transaction\n" ++
+           "exit                          Gracefully terminate the active session and exit\n" ++
+           "                              the application\n" ++
+           "help                          Display this help text\n"
+
+
 -- |Initialize the client
 main :: IO ()
 main = do
@@ -347,13 +369,18 @@ processInput ("subs":[]) session _ subChan = do
     return session
 
 -- exit the application
-processInput ("exit":_) session eventChan _ = do
+processInput ("exit":[]) session eventChan _ = do
     gracefulDisconnect session
     return $ ExitApp (getLogger session)
 
+processInput ("help":[]) session _ _ = do
+    sLog session helpText
+    return session
+
 -- any other input pattern is considered an error
 processInput _ session _ _ = do
-    sLog session "Unrecognized or malformed command"
+    sLog session "Unrecognized or malformed command\n"
+    sLog session helpText
     return session
 
 -- |Disconnect gracefully from a session
