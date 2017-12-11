@@ -1,3 +1,4 @@
+import Control.Concurrent.TxEvent
 import Stomp.Frames
 import Stomp.Frames.IO
 import Network as Network
@@ -18,11 +19,15 @@ main = do
         otherwise                              -> error "There was a problem initiating the connection"
     sendLoop dest frameHandler n
 
+
+
 sendLoop :: String -> FrameHandler -> Int -> IO ()
 sendLoop dest frameHandler n = do
     put frameHandler (sendText ("Hello, " ++ dest) dest)
     if n > 1 then
         sendLoop dest frameHandler (n - 1)
+    else if n == -1 then do
+        sendLoop dest frameHandler n
     else return ()
 
 
@@ -31,6 +36,6 @@ portFromString :: String -> PortID
 portFromString s = PortNumber (fromIntegral ((read s)::Int))
 
 processArgs :: [String] -> IO (HostName, String, String, Int)
-processArgs (s:[]) = return ("localhost", "2323", s, 1000)
+processArgs (s:[]) = return ("localhost", "2323", s, -1)
 processArgs(s:n:[]) = return ("localhost", "2323", s, (read n)::Int)
-processArgs _ = return ("localhost", "2323", "q1", 1000)
+processArgs _ = return ("localhost", "2323", "q1", -1)
