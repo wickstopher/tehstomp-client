@@ -1,3 +1,6 @@
+HeartBeatBadClient
+HeartBeatGood
+HeartBeatServerTimeout
 StompClient
 Consumer
 Producer
